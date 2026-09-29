@@ -39,8 +39,22 @@ export class Conn extends EventTarget {
       this.dispatchEvent(new Event('down'));
       if (this.final) return;
       const delay = Math.min(15000, 1000 * 2 ** this.retry++);
-      setTimeout(() => this.open(), delay);
+      this.timer = setTimeout(() => this.open(), delay);
     };
+  }
+
+  // 页面回到前台或网络恢复时，不等退避计时，立刻重连
+  reconnectNow() {
+    if (this.final) return;
+    const st = this.ws?.readyState;
+    if (st === WebSocket.OPEN || st === WebSocket.CONNECTING) return;
+    clearTimeout(this.timer);
+    this.retry = 0;
+    this.open();
+  }
+
+  get isOpen() {
+    return this.ws?.readyState === WebSocket.OPEN;
   }
 
   send(obj) {

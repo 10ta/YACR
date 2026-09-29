@@ -16,9 +16,22 @@
       <h1 id="screen-title">正在连接</h1>
       <p id="screen-text"></p>
       <div class="screen-actions">
-        <a id="screen-new" class="btn" href="/" hidden>新建房间</a>
+        <a id="screen-home" class="btn" href="/" hidden>回到首页</a>
         <button id="screen-rejoin" class="btn ghost" type="button" hidden>重新加入</button>
       </div>
+    </main>
+
+    <main class="home">
+      <h1>开一个临时聊天室</h1>
+      <p class="home-lead">房间号已经生成好了，进去后把链接发给朋友。也可以换一个，或者填上朋友给你的房间号。</p>
+      <div class="home-code">
+        <input id="home-id" maxlength="8" spellcheck="false" autocomplete="off" autocapitalize="off" aria-label="房间号" />
+        <button id="home-shuffle" class="btn ghost" type="button">换一个</button>
+      </div>
+      <button id="home-go" class="btn home-go" type="button">进入房间</button>
+      <p id="home-err" class="err" role="alert"></p>
+      <div id="home-me" class="home-me"></div>
+      <p class="home-note">不保存任何聊天记录：房间结束时，所有消息和文件一起消失。</p>
     </main>
 
     <div class="chat">
@@ -31,6 +44,7 @@
         </div>
         <div id="members" class="members" aria-label="房间成员"></div>
         <div class="controls">
+          <button id="bell" class="btn small ghost" type="button" aria-pressed="false">开启通知</button>
           <button id="lock" class="btn small ghost" type="button" aria-pressed="false">禁止新人加入</button>
           <button id="leave" class="btn small ghost" type="button">离开</button>
           <button id="end" class="btn small danger" type="button">结束房间</button>
@@ -41,10 +55,14 @@
       <section id="log" class="log" aria-live="polite"></section>
 
       <footer class="composer">
+        <button id="attach" class="btn ghost attach" type="button" aria-label="发送图片、音频或视频" title="发送图片、音频或视频">＋</button>
+        <input id="file" type="file" accept="image/*,video/*,audio/*" multiple hidden />
         <textarea id="input" rows="1" maxlength="4000" placeholder="说点什么…" aria-label="消息"></textarea>
         <button id="send" class="btn" type="button">发送</button>
       </footer>
       <p id="hint" class="hint"></p>
     </div>
+
+    <div id="viewer" class="viewer" hidden><img alt="" /></div>
   </body>
 </html>

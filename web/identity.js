@@ -1,3 +1,5 @@
+import { EMOJI } from './emoji.js';
+
 const ADJ = [
   '害羞的', '困倦的', '勇敢的', '好奇的', '安静的', '快乐的', '迷糊的', '认真的',
   '慢吞吞的', '爱笑的', '神秘的', '优雅的', '倔强的', '机灵的', '温柔的', '淡定的',
@@ -38,7 +40,7 @@ export const identityFor = (uid) => {
   return {
     uid,
     name: ADJ[hash(uid + '#a') % ADJ.length] + animal,
-    initial: animal[0],
+    emoji: EMOJI[hash(uid + '#e') % EMOJI.length],
     ...colorFor(uid),
   };
 };

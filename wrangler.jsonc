@@ -23,6 +23,7 @@
     "UNJOINED_MINUTES": "5",
     "TOMBSTONE_HOURS": "24",
     "MAX_MEMBERS": "10",
+    "MAX_FILE_MB": "100",
     "CREATE_LIMIT_PER_10MIN": "10"
   },
   "observability": { "enabled": true }

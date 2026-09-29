@@ -26,7 +26,7 @@
         <p class="err" id="login-err"></p>
       </section>
 
-      <section id="panel" hidden>
+      <div id="panel" hidden>
         <div class="site-state" id="site">
           <span class="lamp" aria-hidden="true"></span>
           <div class="grow">
@@ -36,18 +36,40 @@
           <button class="btn" id="site-toggle" type="button"></button>
         </div>
 
-        <div class="admin-head">
-          <h1 id="rooms-title">活跃房间</h1>
-          <button class="btn small danger" id="end-all" type="button">结束全部房间</button>
-        </div>
-        <table class="rooms">
-          <thead>
-            <tr><th>房间</th><th>成员</th><th>状态</th><th>最后消息</th><th></th></tr>
-          </thead>
-          <tbody id="rooms"></tbody>
-        </table>
-        <p class="empty" id="empty" hidden>现在没有活跃的房间。</p>
-      </section>
+        <section>
+          <div class="admin-head">
+            <h2 id="rooms-title">活跃房间</h2>
+            <button class="btn small danger" id="end-all" type="button">结束全部房间</button>
+          </div>
+          <table class="rooms">
+            <thead>
+              <tr><th>房间</th><th>成员</th><th>状态</th><th>最后消息</th><th></th></tr>
+            </thead>
+            <tbody id="rooms"></tbody>
+          </table>
+          <p class="empty" id="empty" hidden>现在没有活跃的房间。</p>
+        </section>
+
+        <section>
+          <h2>封禁名单</h2>
+          <table class="rooms">
+            <thead><tr><th>对象</th><th>名字</th><th>时间</th><th></th></tr></thead>
+            <tbody id="bans"></tbody>
+          </table>
+          <p class="empty" id="bans-empty" hidden>没有封禁任何人。</p>
+        </section>
+
+        <section>
+          <h2>房间设置</h2>
+          <p class="empty" style="padding: 0 0 12px">只对之后新建的房间生效。</p>
+          <div class="settings" id="settings"></div>
+          <div class="admin-row" style="margin-top: 14px">
+            <button class="btn small" id="save-settings" type="button">保存设置</button>
+            <span id="settings-msg" class="ok"></span>
+          </div>
+          <p class="empty" id="turn-state"></p>
+        </section>
+      </div>
     </main>
 
     <script>
@@ -62,12 +84,20 @@
         const s = Math.round((Date.now() - t) / 1000);
         if (s < 60) return `${s} 秒前`;
         if (s < 3600) return `${Math.round(s / 60)} 分钟前`;
-        return `${Math.round(s / 3600)} 小时前`;
+        if (s < 86400) return `${Math.round(s / 3600)} 小时前`;
+        return `${Math.round(s / 86400)} 天前`;
       };
       const post = (path, body) =>
         fetch(path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body || {}) });
+      const LABELS = {
+        idleMinutes: '无新消息自动结束（分钟）',
+        maxMembers: '每个房间人数上限',
+        maxFileMB: '单个文件上限（MB）',
+        createLimit: '每 IP 每 10 分钟建房数',
+      };
 
       let state = null;
+      let editing = false;
 
       async function load() {
         const r = await fetch('/api/admin/state');
@@ -93,12 +123,12 @@
           : '访客只会看到"网站维护中"，你本人不受影响。';
         $('#site-toggle').textContent = open ? '关闭站点' : '开放站点';
 
+        // 房间
         const tbody = $('#rooms');
         tbody.replaceChildren();
         $('#rooms-title').textContent = `活跃房间（${state.rooms.length}）`;
         $('#empty').hidden = state.rooms.length > 0;
         $('#end-all').hidden = state.rooms.length === 0;
-
         for (const room of state.rooms) {
           const tr = el('tr');
           const code = el('td');
@@ -108,7 +138,26 @@
           if (!room.members.length) list.append(el('span', '', '（没人）'));
           for (const m of room.members) {
             const line = el('div', '', m.name || m.uid);
-            line.append(el('span', '', `${m.ip || '未知 IP'}${m.admin ? '（管理员）' : ''}`));
+            const sub = el('span', '', `${m.ip || '未知 IP'}${m.admin ? '（管理员）' : ''} `);
+            if (!m.admin) {
+              // 默认只封设备标识；封 IP 会连带同一出口的所有人（家庭、公司、手机网络常共用 IP）
+              const ban = el('button', 'link-btn', '封禁');
+              ban.type = 'button';
+              ban.onclick = async () => {
+                if (!confirm(`封禁「${m.name}」并立即移出房间？\n（按浏览器标识封禁，对方清除浏览器数据可以绕过；需要更强时用"封 IP"。）`)) return;
+                await post('/api/admin/ban', { uid: m.uid, name: m.name });
+                load();
+              };
+              const banIp = el('button', 'link-btn', '封 IP');
+              banIp.type = 'button';
+              banIp.onclick = async () => {
+                if (!confirm(`封禁 IP ${m.ip}？\n同一网络出口下的所有人都会被移出并无法进入，包括和他共用网络的家人、同事，以及同一运营商出口的手机用户。`)) return;
+                await post('/api/admin/ban', { uid: m.uid, ip: m.ip, name: m.name });
+                load();
+              };
+              sub.append(ban, ' ', banIp);
+            }
+            line.append(sub);
             list.append(line);
           }
           who.append(list);
@@ -119,23 +168,78 @@
           enter.href = `/${room.id}`;
           enter.target = '_blank';
           enter.rel = 'noopener';
-          act.append(enter);
-          const btn = el('button', 'btn small danger', '结束');
-          btn.type = 'button';
-          btn.onclick = async () => {
+          const end = el('button', 'btn small danger', '结束');
+          end.type = 'button';
+          end.onclick = async () => {
             if (!confirm(`结束房间 ${room.id}？`)) return;
             await post(`/api/admin/rooms/${room.id}/end`);
             load();
           };
-          act.append(btn);
+          act.append(enter, end);
           tr.append(code, who, st, last, act);
           tbody.append(tr);
         }
+
+        // 封禁
+        const bans = $('#bans');
+        bans.replaceChildren();
+        $('#bans-empty').hidden = state.bans.length > 0;
+        for (const b of state.bans) {
+          const tr = el('tr');
+          const isIp = b.key.startsWith('ban:ip:');
+          const target = b.key.replace(/^ban:(uid|ip):/, '');
+          tr.append(
+            el('td', '', `${isIp ? 'IP' : '设备'}：${target}`),
+            el('td', '', b.name || '—'),
+            el('td', '', ago(b.at)),
+          );
+          const td = el('td', 'actions');
+          const un = el('button', 'btn small ghost', '解除');
+          un.type = 'button';
+          un.onclick = async () => {
+            await post('/api/admin/unban', { key: b.key });
+            load();
+          };
+          td.append(un);
+          tr.append(td);
+          bans.append(tr);
+        }
+
+        // 设置（正在编辑时不覆盖输入框）
+        if (!editing) {
+          const box = $('#settings');
+          box.replaceChildren();
+          for (const [k, spec] of Object.entries(state.settingsSpec)) {
+            const label = el('label', '', LABELS[k] || k);
+            const input = el('input');
+            input.type = 'number';
+            input.min = spec.min;
+            input.max = spec.max;
+            input.value = state.settings[k];
+            input.dataset.key = k;
+            input.oninput = () => (editing = true);
+            label.append(input);
+            box.append(label);
+          }
+        }
+        $('#turn-state').textContent = state.turn
+          ? 'TURN 中继：已配置。直连失败时会自动走 Cloudflare 中继。'
+          : 'TURN 中继：未配置（缺少 TURN_KEY_ID / TURN_KEY_API_TOKEN），直连失败的人之间无法通信。';
       }
 
+      $('#save-settings').onclick = async () => {
+        const body = {};
+        for (const i of document.querySelectorAll('#settings input')) body[i.dataset.key] = Number(i.value);
+        const r = await post('/api/admin/settings', body);
+        editing = false;
+        $('#settings-msg').textContent = r.ok ? '已保存' : '保存失败';
+        setTimeout(() => ($('#settings-msg').textContent = ''), 2000);
+        load();
+      };
       $('#login-btn').onclick = async () => {
         $('#login-err').textContent = '';
         const r = await post('/api/admin/login', { token: $('#token').value });
+        if (r.status === 429) return ($('#login-err').textContent = '尝试次数太多，请 15 分钟后再试。');
         if (!r.ok) return ($('#login-err').textContent = '令牌不对。');
         $('#token').value = '';
         load();
