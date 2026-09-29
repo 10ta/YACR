@@ -1,0 +1,95 @@
+From 6cf78da0cd79efa5b95a21da1cb93400cec22163 Mon Sep 17 00:00:00 2001
+From: x <x@x>
+Date: Tue, 29 Sep 2026 13:53:43 +0000
+Subject: [PATCH] feat: support access via reverse proxy (ALLOWED_ORIGINS,
+ PROXY_SECRET real client IP)
+
+---
+ README.md     | 18 +++++++++++++++++-
+ src/worker.js | 25 +++++++++++++++++++++++--
+ 2 files changed, 40 insertions(+), 3 deletions(-)
+
+diff --git a/README.md b/README.md
+index fe47817..4a68442 100644
+--- a/README.md
++++ b/README.md
+@@ -38,7 +38,7 @@ Yet another chat room：打开即用的临时聊天室。房间号给你生成
+ 一个 Cloudflare Worker 同时托管静态页面和一个很小的后端：
+ 
+ - `public/`：静态页面（首页和聊天是同一个页面，另有 `admin.html`）。访问静态文件免费且不触发 Worker。
+-- `src/worker.js`：只处理 `/api/*` 和 `/ws/*`，并检查 Origin，只接受本站页面发起的请求。
++- `src/worker.js`：只处理 `/api/*` 和 `/ws/*`，并检查 Origin，只接受本站页面（及 `ALLOWED_ORIGINS` 里的反代域名）发起的请求。
+   - `Room`（Durable Object，每个房间一个）：Trystero 信令中继、在线名单、房间锁定、自动结束。
+   - `Registry`（Durable Object，全局一个）：站点开关、访客新建开关、活跃房间列表、后台设置、封禁名单、建房 / ICE / 登录限流。
+ - `web/`：前端源码，由 `scripts/build.mjs` 打包成 `public/app.js`。
+@@ -60,6 +60,22 @@ Yet another chat room：打开即用的临时聊天室。房间号给你生成
+ 
+ 之后每次推送到 `main` 都会自动重新部署，Secret 会一直保留。
+ 
++## 经 VPS 反向代理（改善中国大陆访问）
++
++`*.workers.dev` 在国内基本打不开，Cloudflare 自定义域名直连也常常慢或不稳定。可以让访客访问一个解析到 VPS 的域名，由 VPS 把请求转给 Worker。只有页面和信令经过 VPS，聊天内容仍是浏览器之间直连（或走 TURN），VPS 流量很小。
++
++需要两个域名：
++
++- **源站域名**（如 `o.example.com`）：在 Cloudflare 绑定为 Worker 的自定义域名，管理员从这里进后台，可以用 Cloudflare Access 保护。
++- **访客域名**（如 `chat.example.com`）：DNS 解析到 VPS，**不开 Cloudflare 代理（灰云）**，由 VPS 上的反代转发到源站域名。
++
++Worker 需要两个 Secret（用 Secret 而不是普通变量：值不公开，且不会被自动部署覆盖）：
++
++- `ALLOWED_ORIGINS`：访客域名的完整来源，如 `https://chat.example.com`，多个用逗号分隔。不设置的话，经反代来的请求会被 Origin 检查拒绝。
++- `PROXY_SECRET`：一串随机字符串（`openssl rand -hex 24`）。反代在 `X-Yacr-Proxy` 头里带上它，Worker 才会采信 `X-Yacr-Client-IP` 里的访客真实 IP；否则所有访客都会被当成 VPS 的 IP，按 IP 的限流和封禁会失效或误伤所有人。
++
++反代时要做到：请求头 `Host` 改成源站域名、TLS SNI 用源站域名、覆盖（而不是追加）上面两个头、支持 WebSocket，并且屏蔽 `/admin` 和 `/api/admin/`（后台只从源站域名访问）。如果反代前面还有一层本机转发（例如 sing-box 按 SNI 分流后转给 Caddy），反代看到的来源 IP 会是 `127.0.0.1`，此时需要让前一层把真实 IP 传过来（如 PROXY protocol），否则 Worker 会把这些访客都记为同一个"proxy"IP。
++
+ ## TURN 中继
+ 
+ **不配置也能用**，只是有一部分人之间会连不上：两边都用手机流量（运营商级 NAT）、公司或学校网络封锁 UDP、开着代理或 VPN 接管了流量等情况。连不上的两人互相收不到消息和文件，成员栏会显示"正在连接"并出现提示；房间人数、锁定、结束等功能不受影响。
+diff --git a/src/worker.js b/src/worker.js
+index d9ef49b..d7f4f8f 100644
+--- a/src/worker.js
++++ b/src/worker.js
+@@ -46,6 +46,25 @@ const json = (data, status = 200, headers = {}) =>
+ 
+ const clip = (s, n) => String(s ?? '').slice(0, n);
+ 
++// ---------- 经 VPS 反向代理访问时 ----------
++// ALLOWED_ORIGINS：额外允许的页面来源（反代域名），逗号分隔，如 https://chat.example.com
++// PROXY_SECRET：反代在 X-Yacr-Proxy 头里带上它，才信任 X-Yacr-Client-IP 里的真实访客 IP；
++// 否则所有经反代的访客都会被当成同一个 IP（VPS 的 IP），按 IP 的限流和封禁就全乱了。
++const allowedOrigins = (env) =>
++  String(env.ALLOWED_ORIGINS || '')
++    .split(',')
++    .map((s) => s.trim().replace(/\/+$/, ''))
++    .filter(Boolean);
++const IP_RE = /^[0-9a-f.:]{3,45}$/i;
++const clientIp = (req, env) => {
++  const edge = req.headers.get('cf-connecting-ip') || 'unknown';
++  const secret = env.PROXY_SECRET;
++  if (!secret || !safeEqual(req.headers.get('x-yacr-proxy') || '', secret)) return edge;
++  const real = (req.headers.get('x-yacr-client-ip') || '').trim();
++  if (IP_RE.test(real) && !/^(127\.|::1$|::ffff:127\.)/.test(real)) return real;
++  return `proxy:${edge}`; // 反代没拿到真实 IP（例如前面还有一层本机转发）
++};
++
+ // ---------- 管理员鉴权 ----------
+ // cookie 里不存令牌原文，只存"过期时间.签名"，签名 = HMAC-SHA256(ADMIN_TOKEN, 过期时间)。
+ // 服务端无需存储会话；更换 ADMIN_TOKEN 后所有旧会话立即失效。
+@@ -146,10 +165,12 @@ export default {
+     const url = new URL(req.url);
+     const path = url.pathname;
+     const origin = req.headers.get('origin');
+-    if (origin && origin !== url.origin) return json({ error: 'forbidden_origin' }, 403);
++    if (origin && origin !== url.origin && !allowedOrigins(env).includes(origin)) {
++      return json({ error: 'forbidden_origin' }, 403);
++    }
+ 
+     const admin = await isAdmin(req, env);
+-    const ip = req.headers.get('cf-connecting-ip') || 'unknown';
++    const ip = clientIp(req, env);
+ 
+     try {
+       if (path === '/api/status') return json({ ...(await siteState(env)), admin });
+-- 
+2.43.0
+
