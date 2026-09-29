@@ -1,0 +1,2089 @@
+From 559be972406a6f500dfcc4c28ddbb170a2668a4c Mon Sep 17 00:00:00 2001
+From: x <x@x>
+Date: Tue, 29 Sep 2026 13:01:48 +0000
+Subject: [PATCH] feat: home page, emoji avatars, TURN, media messages, bans,
+ login limit, admin settings, notifications, reconnect on wake
+
+---
+ README.md         |  94 ++++---
+ public/admin.html | 146 ++++++++--
+ public/index.html |  20 +-
+ public/style.css  | 115 +++++++-
+ src/worker.js     | 306 ++++++++++++++++++---
+ web/app.js        | 677 ++++++++++++++++++++++++++++++++++++++--------
+ web/emoji.js      |   3 +
+ web/identity.js   |   4 +-
+ web/relay.js      |  16 +-
+ wrangler.jsonc    |   1 +
+ 10 files changed, 1158 insertions(+), 224 deletions(-)
+ create mode 100644 web/emoji.js
+
+diff --git a/README.md b/README.md
+index 0ec8b84..5fb313a 100644
+--- a/README.md
++++ b/README.md
+@@ -1,39 +1,51 @@
+-# roomchat
++# YACR
+ 
+-打开即用的临时聊天室。打开首页自动生成一个房间，把链接发给朋友就能进来；每人随机分到一个动物名和一个纯色圆形头像。聊天内容在浏览器之间 P2P 直连传输，服务器只负责"牵线"（信令），看不到消息；不保存任何历史，房间结束即清空。
++Yet another chat room：打开即用的临时聊天室。首页给你生成好一个房间号，进去后把链接发给朋友；每人随机分到一个动物名，头像是一个随机 emoji 配纯色圆底。文字、图片、音频、视频都在浏览器之间 P2P 直连传输，服务器只负责"牵线"（信令），看不到内容；不保存任何历史，房间结束即清空。
+ 
+-## 架构
+-
+-一个 Cloudflare Worker 同时托管静态页面和一个很小的后端：
++## 功能
+ 
+-- `public/`：静态页面。访问静态文件免费且不触发 Worker。
+-- `src/worker.js`：只处理 `/api/*` 和 `/ws/*`。
+-  - `Room`（Durable Object，每个房间一个）：Trystero 信令中继、房间锁定、自动结束。
+-  - `Registry`（Durable Object，全局一个）：站点开关、活跃房间列表、建房限流。
+-- `web/`：前端源码，由 `scripts/build.mjs` 打包成 `public/app.js`。
++- 首页预生成 6 位房间号，可以换一个，也可以填朋友给的房间号直接进入
++- 文字消息（链接可点击、单条复制）；图片、音频、视频（先发缩略图"公告"，别人需要时再按需下载，5 MB 以下的图片自动下载）
++- 房间里任何人都可以"禁止新人加入"，已在房间里的人刷新仍能回来
++- 成员栏显示谁已连上、谁还在连接；长时间连不上会给出提示
++- 标签页标题显示未读数，可选开启系统通知；手机切回前台自动重连
++- 直连失败时自动走 Cloudflare TURN 中继（需配置）
++- 管理后台：站点总开关、查看和结束房间、进入任意房间、封禁（按浏览器标识或 IP）、调整房间参数
+ 
+-房间在以下情况结束，结束后所有人被移出、内存中的消息清空：
++房间在以下情况结束，结束后所有人被移出、内存中的消息和文件清空：
+ 
+ 1. 房间里任何人点"结束房间"；
+ 2. 所有人都离开（有 60 秒宽限，刷新页面不会误杀）；
+-3. 30 分钟没有新消息；
++3. 一段时间没有新消息（默认 30 分钟，可在后台调整）；
+ 4. 创建后 5 分钟没人加入；
+ 5. 管理员在后台结束，或关闭站点。
+ 
+-房间里的任何人都可以切换"禁止新人加入"。已经在房间里的人刷新页面仍然可以回来。
++## 架构
+ 
+-## 部署（GitHub + Cloudflare Workers）
++一个 Cloudflare Worker 同时托管静态页面和一个很小的后端：
++
++- `public/`：静态页面。访问静态文件免费且不触发 Worker。
++- `src/worker.js`：只处理 `/api/*` 和 `/ws/*`，并检查 Origin，只接受本站页面发起的请求。
++  - `Room`（Durable Object，每个房间一个）：Trystero 信令中继、在线名单、房间锁定、自动结束。
++  - `Registry`（Durable Object，全局一个）：站点开关、活跃房间列表、后台设置、封禁名单、建房和登录限流。
++- `web/`：前端源码，由 `scripts/build.mjs` 打包成 `public/app.js`。
+ 
+-1. 把这个仓库推到 GitHub（建议设为私有）。
+-2. Cloudflare 控制台 → Workers & Pages → 创建 → 导入 GitHub 仓库，选中它。
+-   - Worker 名称填 `roomchat`（必须与 `wrangler.jsonc` 里的 `name` 一致）。
+-   - 部署命令用默认的 `npx wrangler deploy` 即可。它会先自动执行 `npm run build`，构建命令一栏可以留空。
+-3. 设置管理员令牌：进入该 Worker → Settings → Variables and Secrets → 添加，类型选 **Secret**，名称 `ADMIN_TOKEN`，值用一串足够长的随机字符串（比如 `openssl rand -base64 24` 的输出）。
+-   也可以用命令行：`npx wrangler secret put ADMIN_TOKEN`。
+-4. 打开 `https://<你的域名>/admin`，用令牌登录，点"开放站点"。**站点默认是关闭的**，访客只会看到"网站维护中"。
+-5. 建议绑定自定义域名（Worker → Settings → Domains & Routes）。`*.workers.dev` 在国内经常无法访问。
++## 部署（GitHub + Cloudflare Workers）
+ 
+-之后每次推送到 GitHub 都会自动重新部署。
++1. Cloudflare 控制台 → Workers & Pages → 导入这个 GitHub 仓库。
++   - Worker 名称必须与 `wrangler.jsonc` 里的 `name` 一致。
++   - 部署命令用默认的 `npx wrangler deploy`，它会先自动执行 `npm run build`，构建命令一栏留空。
++   - 在构建设置里关闭非生产分支的构建，只让 `main` 触发部署。
++2. 在 Worker → Settings → Variables and Secrets 添加 Secret：
++   - `ADMIN_TOKEN`（必填）：管理后台令牌，用 `openssl rand -base64 32` 生成。
++   - `TURN_KEY_ID`、`TURN_KEY_API_TOKEN`（选填）：Cloudflare Realtime → TURN 里创建的 TURN Key。不填也能用，只是直连失败的人之间无法通信。
++3. 打开 `https://<你的域名>/admin`，用令牌登录，点"开放站点"。**站点默认是关闭的**。
++4. 建议：
++   - 绑定自定义域名（`*.workers.dev` 在国内经常无法访问），域名只在控制台配置，不要写进仓库。
++   - 用 Cloudflare Access 保护 `admin*` 和 `api/admin/*` 两个路径。
++   - 确认自定义域名可用后，在 `wrangler.jsonc` 加上 `"workers_dev": false` 和 `"preview_urls": false`，关闭可以绕过 Access 的默认地址。
++
++之后每次推送到 `main` 都会自动重新部署。
+ 
+ ## 本地开发
+ 
+@@ -43,32 +55,40 @@ cp .dev.vars.example .dev.vars   # 修改里面的 ADMIN_TOKEN
+ npm run dev                      # http://localhost:8787
+ ```
+ 
+-在同一台电脑上用两个不同的浏览器（或一个普通窗口加一个无痕窗口）就能互相聊天。
++用两个不同的浏览器（或普通窗口加无痕窗口）就能互相聊天。
+ 
+-## 可调参数
++## 参数
+ 
+-在 `wrangler.jsonc` 的 `vars` 里修改：
++部署默认值在 `wrangler.jsonc` 的 `vars` 里。前四项也可以在管理后台修改，后台的修改只对之后新建的房间生效。
+ 
+ | 变量 | 默认 | 含义 |
+ |---|---|---|
+ | `IDLE_MINUTES` | 30 | 多久没有新消息自动结束房间 |
+-| `EMPTY_GRACE_SECONDS` | 60 | 所有人离开后多久结束房间 |
+-| `UNJOINED_MINUTES` | 5 | 创建后多久没人加入就失效 |
+-| `TOMBSTONE_HOURS` | 24 | 结束的房间 ID 保留多久（期间打开链接显示"已结束"） |
+ | `MAX_MEMBERS` | 10 | 每个房间人数上限 |
++| `MAX_FILE_MB` | 100 | 单个图片、音频、视频的大小上限 |
+ | `CREATE_LIMIT_PER_10MIN` | 10 | 每个 IP 每 10 分钟最多建几个房间 |
++| `EMPTY_GRACE_SECONDS` | 60 | 所有人离开后多久结束房间 |
++| `UNJOINED_MINUTES` | 5 | 创建后多久没人加入就失效 |
++| `TOMBSTONE_HOURS` | 24 | 结束的房间号保留多久（期间打开链接显示"已结束"） |
++
++管理员登录：同一 IP 15 分钟内输错 5 次会被暂时锁定。
++
++## 房间号
++
++6 位，字符集为 `0-9` 加去掉 `i l o u` 的 22 个小写字母，共 32 种字符，约 10.7 亿种组合，用 `crypto.getRandomValues` 生成，服务端建房时查重。输入不区分大小写，`o` 自动当作 `0`，`i`、`l` 当作 `1`。
++
++## 封禁的边界
+ 
+-## 房间 ID
++没有账号体系，所以封禁只能做到"防君子"：
+ 
+-6 位，字符集为 `0-9` 加去掉 `i l o u` 的 22 个小写字母，共 32 种字符，约 10.7 亿种组合，由服务端用 `crypto.getRandomValues` 生成并查重。输入不区分大小写，`o` 自动当作 `0`，`i`、`l` 当作 `1`。
++- **封禁**：按浏览器标识（存在 localStorage 的随机 ID），对方清除浏览器数据或换浏览器即可绕过。
++- **封 IP**：更难绕过，但会连带同一网络出口下的所有人（家人、同事、同一运营商的手机用户），谨慎使用。
+ 
+-## 关于 Trystero 的两处处理
++## 关于 Trystero 的处理
+ 
+ - 使用 `@trystero-p2p/core` 0.25.4 的自定义信令策略（`web/relay.js`），版本已锁定，升级前请先测试。
+-- 关闭了 trickle ICE（`trickleIce: false`）。原因：0.25.x 在房间里第一个人等待超过约 57 秒后，新加入的人会连不上（上游 issue #204）；关闭 trickle 后实测正常。代价是建连要等 ICE 收集，因此 `scripts/build.mjs` 在打包时把 Trystero 的收集超时从 15 秒改为 3 秒。若 Trystero 源码变化导致替换失败，构建会直接报错而不是悄悄失效。
++- 关闭了 trickle ICE（`trickleIce: false`）。0.25.x 在房间里有人等待超过约 57 秒后，新加入的人会连不上（上游 issue #204），关闭 trickle 后实测正常。代价是建连要等 ICE 收集，因此 `scripts/build.mjs` 打包时把 Trystero 的收集超时从 15 秒改为 3 秒；若 Trystero 源码变化导致替换失败，构建会直接报错。
+ 
+-## 还没做的
++## 头像 emoji
+ 
+-- 发送图片、音频、视频
+-- TURN 中继（部分网络之间无法直连时需要）
+-- 管理员按人封禁
++`web/emoji.js` 由 unicode-emoji-json 生成：除旗帜外的全部分组，限 Emoji 12.0 及以前（老系统也能显示），不含 ZWJ 组合和键帽数字。
+diff --git a/public/admin.html b/public/admin.html
+index 6141be2..d9afedc 100644
+--- a/public/admin.html
++++ b/public/admin.html
+@@ -26,7 +26,7 @@
+         <p class="err" id="login-err"></p>
+       </section>
+ 
+-      <section id="panel" hidden>
++      <div id="panel" hidden>
+         <div class="site-state" id="site">
+           <span class="lamp" aria-hidden="true"></span>
+           <div class="grow">
+@@ -36,18 +36,40 @@
+           <button class="btn" id="site-toggle" type="button"></button>
+         </div>
+ 
+-        <div class="admin-head">
+-          <h1 id="rooms-title">活跃房间</h1>
+-          <button class="btn small danger" id="end-all" type="button">结束全部房间</button>
+-        </div>
+-        <table class="rooms">
+-          <thead>
+-            <tr><th>房间</th><th>成员</th><th>状态</th><th>最后消息</th><th></th></tr>
+-          </thead>
+-          <tbody id="rooms"></tbody>
+-        </table>
+-        <p class="empty" id="empty" hidden>现在没有活跃的房间。</p>
+-      </section>
++        <section>
++          <div class="admin-head">
++            <h2 id="rooms-title">活跃房间</h2>
++            <button class="btn small danger" id="end-all" type="button">结束全部房间</button>
++          </div>
++          <table class="rooms">
++            <thead>
++              <tr><th>房间</th><th>成员</th><th>状态</th><th>最后消息</th><th></th></tr>
++            </thead>
++            <tbody id="rooms"></tbody>
++          </table>
++          <p class="empty" id="empty" hidden>现在没有活跃的房间。</p>
++        </section>
++
++        <section>
++          <h2>封禁名单</h2>
++          <table class="rooms">
++            <thead><tr><th>对象</th><th>名字</th><th>时间</th><th></th></tr></thead>
++            <tbody id="bans"></tbody>
++          </table>
++          <p class="empty" id="bans-empty" hidden>没有封禁任何人。</p>
++        </section>
++
++        <section>
++          <h2>房间设置</h2>
++          <p class="empty" style="padding: 0 0 12px">只对之后新建的房间生效。</p>
++          <div class="settings" id="settings"></div>
++          <div class="admin-row" style="margin-top: 14px">
++            <button class="btn small" id="save-settings" type="button">保存设置</button>
++            <span id="settings-msg" class="ok"></span>
++          </div>
++          <p class="empty" id="turn-state"></p>
++        </section>
++      </div>
+     </main>
+ 
+     <script>
+@@ -62,12 +84,20 @@
+         const s = Math.round((Date.now() - t) / 1000);
+         if (s < 60) return `${s} 秒前`;
+         if (s < 3600) return `${Math.round(s / 60)} 分钟前`;
+-        return `${Math.round(s / 3600)} 小时前`;
++        if (s < 86400) return `${Math.round(s / 3600)} 小时前`;
++        return `${Math.round(s / 86400)} 天前`;
+       };
+       const post = (path, body) =>
+         fetch(path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body || {}) });
++      const LABELS = {
++        idleMinutes: '无新消息自动结束（分钟）',
++        maxMembers: '每个房间人数上限',
++        maxFileMB: '单个文件上限（MB）',
++        createLimit: '每 IP 每 10 分钟建房数',
++      };
+ 
+       let state = null;
++      let editing = false;
+ 
+       async function load() {
+         const r = await fetch('/api/admin/state');
+@@ -93,12 +123,12 @@
+           : '访客只会看到"网站维护中"，你本人不受影响。';
+         $('#site-toggle').textContent = open ? '关闭站点' : '开放站点';
+ 
++        // 房间
+         const tbody = $('#rooms');
+         tbody.replaceChildren();
+         $('#rooms-title').textContent = `活跃房间（${state.rooms.length}）`;
+         $('#empty').hidden = state.rooms.length > 0;
+         $('#end-all').hidden = state.rooms.length === 0;
+-
+         for (const room of state.rooms) {
+           const tr = el('tr');
+           const code = el('td');
+@@ -108,7 +138,26 @@
+           if (!room.members.length) list.append(el('span', '', '（没人）'));
+           for (const m of room.members) {
+             const line = el('div', '', m.name || m.uid);
+-            line.append(el('span', '', `${m.ip || '未知 IP'}${m.admin ? '（管理员）' : ''}`));
++            const sub = el('span', '', `${m.ip || '未知 IP'}${m.admin ? '（管理员）' : ''} `);
++            if (!m.admin) {
++              // 默认只封设备标识；封 IP 会连带同一出口的所有人（家庭、公司、手机网络常共用 IP）
++              const ban = el('button', 'link-btn', '封禁');
++              ban.type = 'button';
++              ban.onclick = async () => {
++                if (!confirm(`封禁「${m.name}」并立即移出房间？\n（按浏览器标识封禁，对方清除浏览器数据可以绕过；需要更强时用"封 IP"。）`)) return;
++                await post('/api/admin/ban', { uid: m.uid, name: m.name });
++                load();
++              };
++              const banIp = el('button', 'link-btn', '封 IP');
++              banIp.type = 'button';
++              banIp.onclick = async () => {
++                if (!confirm(`封禁 IP ${m.ip}？\n同一网络出口下的所有人都会被移出并无法进入，包括和他共用网络的家人、同事，以及同一运营商出口的手机用户。`)) return;
++                await post('/api/admin/ban', { uid: m.uid, ip: m.ip, name: m.name });
++                load();
++              };
++              sub.append(ban, ' ', banIp);
++            }
++            line.append(sub);
+             list.append(line);
+           }
+           who.append(list);
+@@ -119,23 +168,78 @@
+           enter.href = `/${room.id}`;
+           enter.target = '_blank';
+           enter.rel = 'noopener';
+-          act.append(enter);
+-          const btn = el('button', 'btn small danger', '结束');
+-          btn.type = 'button';
+-          btn.onclick = async () => {
++          const end = el('button', 'btn small danger', '结束');
++          end.type = 'button';
++          end.onclick = async () => {
+             if (!confirm(`结束房间 ${room.id}？`)) return;
+             await post(`/api/admin/rooms/${room.id}/end`);
+             load();
+           };
+-          act.append(btn);
++          act.append(enter, end);
+           tr.append(code, who, st, last, act);
+           tbody.append(tr);
+         }
++
++        // 封禁
++        const bans = $('#bans');
++        bans.replaceChildren();
++        $('#bans-empty').hidden = state.bans.length > 0;
++        for (const b of state.bans) {
++          const tr = el('tr');
++          const isIp = b.key.startsWith('ban:ip:');
++          const target = b.key.replace(/^ban:(uid|ip):/, '');
++          tr.append(
++            el('td', '', `${isIp ? 'IP' : '设备'}：${target}`),
++            el('td', '', b.name || '—'),
++            el('td', '', ago(b.at)),
++          );
++          const td = el('td', 'actions');
++          const un = el('button', 'btn small ghost', '解除');
++          un.type = 'button';
++          un.onclick = async () => {
++            await post('/api/admin/unban', { key: b.key });
++            load();
++          };
++          td.append(un);
++          tr.append(td);
++          bans.append(tr);
++        }
++
++        // 设置（正在编辑时不覆盖输入框）
++        if (!editing) {
++          const box = $('#settings');
++          box.replaceChildren();
++          for (const [k, spec] of Object.entries(state.settingsSpec)) {
++            const label = el('label', '', LABELS[k] || k);
++            const input = el('input');
++            input.type = 'number';
++            input.min = spec.min;
++            input.max = spec.max;
++            input.value = state.settings[k];
++            input.dataset.key = k;
++            input.oninput = () => (editing = true);
++            label.append(input);
++            box.append(label);
++          }
++        }
++        $('#turn-state').textContent = state.turn
++          ? 'TURN 中继：已配置。直连失败时会自动走 Cloudflare 中继。'
++          : 'TURN 中继：未配置（缺少 TURN_KEY_ID / TURN_KEY_API_TOKEN），直连失败的人之间无法通信。';
+       }
+ 
++      $('#save-settings').onclick = async () => {
++        const body = {};
++        for (const i of document.querySelectorAll('#settings input')) body[i.dataset.key] = Number(i.value);
++        const r = await post('/api/admin/settings', body);
++        editing = false;
++        $('#settings-msg').textContent = r.ok ? '已保存' : '保存失败';
++        setTimeout(() => ($('#settings-msg').textContent = ''), 2000);
++        load();
++      };
+       $('#login-btn').onclick = async () => {
+         $('#login-err').textContent = '';
+         const r = await post('/api/admin/login', { token: $('#token').value });
++        if (r.status === 429) return ($('#login-err').textContent = '尝试次数太多，请 15 分钟后再试。');
+         if (!r.ok) return ($('#login-err').textContent = '令牌不对。');
+         $('#token').value = '';
+         load();
+diff --git a/public/index.html b/public/index.html
+index edc38c9..f9c14f9 100644
+--- a/public/index.html
++++ b/public/index.html
+@@ -16,11 +16,24 @@
+       <h1 id="screen-title">正在连接</h1>
+       <p id="screen-text"></p>
+       <div class="screen-actions">
+-        <a id="screen-new" class="btn" href="/" hidden>新建房间</a>
++        <a id="screen-home" class="btn" href="/" hidden>回到首页</a>
+         <button id="screen-rejoin" class="btn ghost" type="button" hidden>重新加入</button>
+       </div>
+     </main>
+ 
++    <main class="home">
++      <h1>开一个临时聊天室</h1>
++      <p class="home-lead">房间号已经生成好了，进去后把链接发给朋友。也可以换一个，或者填上朋友给你的房间号。</p>
++      <div class="home-code">
++        <input id="home-id" maxlength="8" spellcheck="false" autocomplete="off" autocapitalize="off" aria-label="房间号" />
++        <button id="home-shuffle" class="btn ghost" type="button">换一个</button>
++      </div>
++      <button id="home-go" class="btn home-go" type="button">进入房间</button>
++      <p id="home-err" class="err" role="alert"></p>
++      <div id="home-me" class="home-me"></div>
++      <p class="home-note">不保存任何聊天记录：房间结束时，所有消息和文件一起消失。</p>
++    </main>
++
+     <div class="chat">
+       <header class="bar">
+         <div class="room">
+@@ -31,6 +44,7 @@
+         </div>
+         <div id="members" class="members" aria-label="房间成员"></div>
+         <div class="controls">
++          <button id="bell" class="btn small ghost" type="button" aria-pressed="false">开启通知</button>
+           <button id="lock" class="btn small ghost" type="button" aria-pressed="false">禁止新人加入</button>
+           <button id="leave" class="btn small ghost" type="button">离开</button>
+           <button id="end" class="btn small danger" type="button">结束房间</button>
+@@ -41,10 +55,14 @@
+       <section id="log" class="log" aria-live="polite"></section>
+ 
+       <footer class="composer">
++        <button id="attach" class="btn ghost attach" type="button" aria-label="发送图片、音频或视频" title="发送图片、音频或视频">＋</button>
++        <input id="file" type="file" accept="image/*,video/*,audio/*" multiple hidden />
+         <textarea id="input" rows="1" maxlength="4000" placeholder="说点什么…" aria-label="消息"></textarea>
+         <button id="send" class="btn" type="button">发送</button>
+       </footer>
+       <p id="hint" class="hint"></p>
+     </div>
++
++    <div id="viewer" class="viewer" hidden><img alt="" /></div>
+   </body>
+ </html>
+diff --git a/public/style.css b/public/style.css
+index 02bd3f1..7d6ffe9 100644
+--- a/public/style.css
++++ b/public/style.css
+@@ -34,9 +34,10 @@ body {
+ :focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+ 
+ /* ---------- 视图切换 ---------- */
+-.screen, .chat { display: none; }
++.screen, .chat, .home { display: none; }
+ body[data-view='loading'] .screen,
+-body[data-view='screen'] .screen { display: flex; }
++body[data-view='screen'] .screen,
++body[data-view='home'] .home { display: flex; }
+ body[data-view='chat'] .chat { display: flex; }
+ 
+ /* ---------- 按钮 ---------- */
+@@ -125,13 +126,14 @@ body[data-view='loading'] .screen-dots i:nth-child(3) { animation-delay: 0.3s; }
+   width: 30px;
+   height: 30px;
+   border-radius: 50%;
+-  color: #fff;
+-  font-size: 14px;
+-  font-weight: 600;
++  font-size: 16px;
++  line-height: 1;
++  font-family: 'Apple Color Emoji', 'Segoe UI Emoji', 'Noto Color Emoji', 'Twemoji Mozilla', var(--font);
+   user-select: none;
+   position: relative;
+ }
+-.dot.lg { width: 36px; height: 36px; font-size: 15px; }
++.dot.lg { width: 36px; height: 36px; font-size: 19px; }
++.members .dot.pending { opacity: 0.45; outline: 2px dashed var(--muted); outline-offset: 1px; }
+ 
+ .banner {
+   margin: 12px 20px 0;
+@@ -219,3 +221,104 @@ body[data-view='loading'] .screen-dots i:nth-child(3) { animation-delay: 0.3s; }
+ .rooms .actions .btn + .btn { margin-left: 8px; }
+ .empty { color: var(--muted); padding: 24px 0; }
+ .err { color: var(--danger); font-size: 14px; }
++
++.btn:disabled { opacity: 0.5; cursor: default; }
++
++/* ---------- 首页 ---------- */
++.home {
++  min-height: 100%;
++  flex-direction: column;
++  justify-content: center;
++  max-width: 480px;
++  margin: 0 auto;
++  padding: 40px 24px;
++}
++.home h1 { font-size: 30px; font-weight: 600; margin: 0 0 10px; letter-spacing: 0.02em; }
++.home-lead { color: var(--muted); margin: 0 0 28px; }
++.home-code { display: flex; gap: 12px; align-items: center; }
++.home-code input {
++  flex: 1;
++  min-width: 0;
++  font: inherit;
++  font-size: 40px;
++  font-weight: 600;
++  letter-spacing: 0.14em;
++  font-variant-numeric: tabular-nums;
++  color: var(--ink);
++  background: var(--surface);
++  border: 1px solid var(--line);
++  border-radius: 14px;
++  padding: 10px 18px;
++  text-transform: lowercase;
++}
++.home-code input:focus { border-color: var(--ink); outline: none; }
++.home-go { margin-top: 16px; font-size: 17px; padding: 12px 18px; width: 100%; }
++.home .err { min-height: 1.4em; margin: 10px 0 0; }
++.home-me { display: flex; align-items: center; gap: 10px; color: var(--muted); font-size: 14px; margin-top: 18px; }
++.home-note { color: var(--muted); font-size: 13px; margin: 28px 0 0; padding-top: 16px; border-top: 1px solid var(--line); }
++@media (max-width: 600px) { .home-code input { font-size: 32px; } }
++
++/* ---------- 消息附加 ---------- */
++.msg .text a { color: inherit; text-decoration: underline; text-underline-offset: 2px; }
++.msg .copy {
++  appearance: none; border: 0; background: none; padding: 0; font: inherit; font-size: 12px;
++  color: var(--muted); cursor: pointer; opacity: 0;
++}
++.msg:hover .copy, .msg .copy:focus-visible { opacity: 1; }
++@media (hover: none) { .msg .copy { opacity: 0.7; } }
++.msg.cont:hover .meta { display: flex; }
++
++/* ---------- 媒体 ---------- */
++.media {
++  position: relative;
++  width: min(320px, 100%);
++  max-height: 360px;
++  border-radius: 12px;
++  overflow: hidden;
++  background: var(--surface);
++  border: 1px solid var(--line);
++  display: flex;
++  flex-direction: column;
++}
++.media.audio { aspect-ratio: auto !important; max-height: none; }
++.media img, .media video { display: block; width: 100%; height: 100%; min-height: 0; flex: 1; object-fit: cover; background: #000; }
++.media.image img:not(.thumb) { cursor: zoom-in; object-fit: contain; }
++.media img.thumb { filter: blur(1px) brightness(0.85); }
++.media audio { width: calc(100% - 16px); margin: 10px 8px 0; }
++.media-icon { font-size: 28px; text-align: center; padding: 14px 0 0; color: var(--muted); }
++.media-load {
++  position: absolute; left: 50%; top: 42%; transform: translate(-50%, -50%);
++  appearance: none; border: 0; border-radius: 999px; padding: 8px 18px; font: inherit; font-size: 14px;
++  background: rgba(0, 0, 0, 0.62); color: #fff; cursor: pointer;
++}
++.media.audio .media-load { position: static; transform: none; margin: 10px auto 0; background: var(--ink); color: var(--paper); }
++.media .bar { position: absolute; left: 12px; right: 12px; top: 42%; height: 6px; border-radius: 3px; background: rgba(0, 0, 0, 0.45); overflow: hidden; }
++.media.audio .bar { position: static; margin: 12px 12px 0; }
++.media .bar i { display: block; height: 100%; background: #fff; transition: width 0.2s; }
++.media.audio .bar i { background: var(--ink); }
++.media-info {
++  display: flex; gap: 8px; align-items: baseline; padding: 6px 10px; font-size: 12px; color: var(--muted);
++  background: var(--surface); flex: none;
++}
++.media-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0; }
++.media-save { color: var(--ink); }
++.media-state.err { color: var(--danger); white-space: normal; }
++.media-note { padding: 18px 12px 6px; margin: 0; font-size: 13px; color: var(--muted); }
++
++.chat.dropping { outline: 2px dashed var(--ink); outline-offset: -8px; }
++.composer .attach { padding: 6px 12px; font-size: 18px; line-height: 1.2; }
++
++.viewer { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.88); display: grid; place-items: center; z-index: 10; cursor: zoom-out; }
++.viewer img { max-width: 96vw; max-height: 94vh; object-fit: contain; }
++
++/* ---------- 管理后台附加 ---------- */
++.admin section + section { margin-top: 36px; }
++.admin h2 { font-size: 18px; font-weight: 600; margin: 0 0 12px; }
++.settings { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 14px; }
++.settings label { display: flex; flex-direction: column; gap: 6px; font-size: 14px; color: var(--muted); }
++.settings input {
++  font: inherit; color: var(--ink); background: var(--surface); border: 1px solid var(--line);
++  border-radius: 10px; padding: 6px 10px; width: 100%;
++}
++.link-btn { appearance: none; border: 0; background: none; padding: 0; font: inherit; font-size: 12px; color: var(--danger); cursor: pointer; }
++.ok { color: #3f9b6b; font-size: 14px; }
+diff --git a/src/worker.js b/src/worker.js
+index acdce01..bbc622a 100644
+--- a/src/worker.js
++++ b/src/worker.js
+@@ -4,24 +4,39 @@ import { DurableObject } from 'cloudflare:workers';
+ const ALPHA = '0123456789abcdefghjkmnpqrstvwxyz';
+ const ID_LEN = 6;
+ const ID_RE = new RegExp(`^[${ALPHA}]{${ID_LEN}}$`);
++const UID_RE = /^[a-z0-9]{10,32}$/;
+ const newId = () =>
+   [...crypto.getRandomValues(new Uint8Array(ID_LEN))].map((b) => ALPHA[b & 31]).join('');
+ const normalizeId = (s) =>
+   String(s || '').toLowerCase().replace(/[^0-9a-z]/g, '').replace(/o/g, '0').replace(/[il]/g, '1');
+ 
+-// ---------- 配置（wrangler.jsonc 的 vars 可覆盖） ----------
++// ---------- 配置 ----------
++// 部署默认值来自 wrangler.jsonc 的 vars；其中一部分可以在管理后台覆盖（存在 Registry 里）。
+ const num = (v, d) => {
+   const n = Number(v);
+   return Number.isFinite(n) && n > 0 ? n : d;
+ };
+-const conf = (env) => ({
+-  idleMs: num(env.IDLE_MINUTES, 30) * 60e3, // 无新消息多久自动结束
++const baseConf = (env) => ({
+   emptyGraceMs: num(env.EMPTY_GRACE_SECONDS, 60) * 1e3, // 所有人离开后的宽限期
+   unjoinedMs: num(env.UNJOINED_MINUTES, 5) * 60e3, // 创建后无人加入的失效时间
+   tombstoneMs: num(env.TOMBSTONE_HOURS, 24) * 3600e3, // 结束后保留墓碑多久
+-  maxMembers: num(env.MAX_MEMBERS, 10),
+-  createLimit: num(env.CREATE_LIMIT_PER_10MIN, 10), // 每 IP 每 10 分钟可建房数
+ });
++// 后台可调的参数：键名、默认值（来自 vars）、允许范围
++const SETTINGS = {
++  idleMinutes: { env: 'IDLE_MINUTES', def: 30, min: 1, max: 1440 },
++  maxMembers: { env: 'MAX_MEMBERS', def: 10, min: 2, max: 30 },
++  maxFileMB: { env: 'MAX_FILE_MB', def: 100, min: 1, max: 500 },
++  createLimit: { env: 'CREATE_LIMIT_PER_10MIN', def: 10, min: 1, max: 1000 },
++};
++const effectiveSettings = (env, overrides = {}) => {
++  const out = {};
++  for (const [k, s] of Object.entries(SETTINGS)) out[k] = num(overrides[k], num(env[s.env], s.def));
++  return out;
++};
++
++const ICE_LIMIT = 20; // 每个 IP 每 10 分钟最多申请几次 ICE 服务器
++const LOGIN_MAX_FAILS = 5; // 每个 IP 在窗口期内最多失败次数
++const LOGIN_WINDOW_MS = 15 * 60e3;
+ 
+ const json = (data, status = 200, headers = {}) =>
+   new Response(JSON.stringify(data), {
+@@ -59,24 +74,62 @@ const siteOpen = async (env) => {
+   return openCache.v;
+ };
+ 
++// ---------- TURN：Cloudflare Realtime TURN 临时凭证 ----------
++// 需要 Secret：TURN_KEY_ID、TURN_KEY_API_TOKEN。未配置时只返回 STUN。
++const STUN = [{ urls: 'stun:stun.cloudflare.com:3478' }];
++const TURN_TTL_S = 4 * 3600;
++let turnCache = { servers: null, until: 0 };
++async function iceServers(env) {
++  if (!env.TURN_KEY_ID || !env.TURN_KEY_API_TOKEN) return STUN;
++  if (turnCache.servers && Date.now() < turnCache.until) return turnCache.servers;
++  const r = await fetch(
++    `https://rtc.live.cloudflare.com/v1/turn/keys/${env.TURN_KEY_ID}/credentials/generate-ice-servers`,
++    {
++      method: 'POST',
++      headers: { authorization: `Bearer ${env.TURN_KEY_API_TOKEN}`, 'content-type': 'application/json' },
++      body: JSON.stringify({ ttl: TURN_TTL_S }),
++    },
++  );
++  if (!r.ok) {
++    console.error('TURN credentials failed', r.status, await r.text().catch(() => ''));
++    return STUN;
++  }
++  const data = await r.json();
++  // 浏览器会拦截 53 端口，没有 trickle ICE 时它会拖到超时，去掉
++  const servers = (data.iceServers || [])
++    .map((s) => {
++      const urls = (Array.isArray(s.urls) ? s.urls : [s.urls]).filter((u) => !/:53(\?|$)/.test(u));
++      return urls.length ? { ...s, urls } : null;
++    })
++    .filter(Boolean);
++  if (!servers.length) return STUN;
++  turnCache = { servers, until: Date.now() + (TURN_TTL_S * 1000) / 2 };
++  return servers;
++}
++
+ // ---------- Worker 入口：只处理 /api/* 与 /ws/*，其余静态文件不经过这里 ----------
+ export default {
+   async fetch(req, env) {
+     const url = new URL(req.url);
+     const path = url.pathname;
+-    const admin = isAdmin(req, env);
+-    const ip = req.headers.get('cf-connecting-ip') || '';
+     const origin = req.headers.get('origin');
+     if (origin && origin !== url.origin) return json({ error: 'forbidden_origin' }, 403);
+ 
++    const admin = isAdmin(req, env);
++    const ip = req.headers.get('cf-connecting-ip') || 'unknown';
++
+     try {
+       if (path === '/api/status') return json({ open: await siteOpen(env), admin });
+ 
+       // ----- 管理员 -----
+       if (path === '/api/admin/login' && req.method === 'POST') {
+-        const { token } = await req.json().catch(() => ({}));
+         if (!env.ADMIN_TOKEN) return json({ error: 'no_admin_token_configured' }, 500);
+-        if (!token || !safeEqual(String(token), env.ADMIN_TOKEN)) return json({ error: 'bad_token' }, 401);
++        const reg = registry(env);
++        if (!(await reg.loginAllowed(ip))) return json({ error: 'too_many_attempts' }, 429);
++        const { token } = await req.json().catch(() => ({}));
++        const ok = Boolean(token) && safeEqual(String(token), env.ADMIN_TOKEN);
++        await reg.loginResult(ip, ok);
++        if (!ok) return json({ error: 'bad_token' }, 401);
+         const cookie = `${COOKIE}=${encodeURIComponent(token)}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=2592000`;
+         return json({ ok: true }, 200, { 'set-cookie': cookie });
+       }
+@@ -91,16 +144,30 @@ export default {
+       // ----- 访客：站点关闭时一律拒绝（管理员除外） -----
+       if (!admin && !(await siteOpen(env))) return json({ error: 'closed' }, 503);
+ 
++      // 新建房间，或用首页填写的房间号进入
+       if (path === '/api/rooms' && req.method === 'POST') {
+-        if (!(await registry(env).reserve(ip || 'unknown', admin))) return json({ error: 'rate_limited' }, 429);
+-        for (let i = 0; i < 5; i++) {
+-          const id = newId();
+-          if ((await roomStub(env, id).init(id)).ok) {
++        const body = await req.json().catch(() => ({}));
++        const uid = UID_RE.test(body.uid || '') ? body.uid : '';
++        const wanted = body.id ? normalizeId(body.id) : '';
++        if (wanted && !ID_RE.test(wanted)) return json({ error: 'bad_id' }, 400);
++
++        if (wanted) {
++          const st = await roomStub(env, wanted).status();
++          if (st.exists && st.state === 'open') return json({ id: wanted, existing: true });
++          if (st.exists) return json({ error: 'ended' }, 410);
++        }
++
++        const gate = await registry(env).createGate(ip, uid, admin);
++        if (!gate.ok) return json({ error: gate.reason }, gate.reason === 'banned' ? 403 : 429);
++
++        const candidates = wanted ? [wanted] : [newId(), newId(), newId(), newId(), newId()];
++        for (const id of candidates) {
++          if ((await roomStub(env, id).init(id, gate.settings)).ok) {
+             await registry(env).add(id);
+             return json({ id });
+           }
+         }
+-        return json({ error: 'busy' }, 503);
++        return json({ error: wanted ? 'taken' : 'busy' }, wanted ? 409 : 503);
+       }
+ 
+       let m = path.match(/^\/api\/rooms\/([^/]+)$/);
+@@ -110,6 +177,20 @@ export default {
+         return json({ id, ...(await roomStub(env, id).status()) });
+       }
+ 
++      // ICE 服务器（含 TURN 临时凭证）：只发给持有有效回房令牌的房间成员
++      if (path === '/api/ice' && req.method === 'POST') {
++        const { room, token, uid } = await req.json().catch(() => ({}));
++        const id = normalizeId(room);
++        if (!ID_RE.test(id) || typeof token !== 'string') return json({ error: 'bad_request' }, 400);
++        if (!admin) {
++          const gate = await registry(env).iceGate(ip, uid);
++          if (!gate.ok) return json({ error: gate.reason }, gate.reason === 'banned' ? 403 : 429);
++        }
++        // 只发给持有有效令牌的房间成员
++        if (!(await roomStub(env, id).hasToken(token))) return json({ error: 'not_member' }, 403);
++        return json({ iceServers: await iceServers(env) });
++      }
++
+       m = path.match(/^\/ws\/([^/]+)$/);
+       if (m) {
+         if (req.headers.get('upgrade') !== 'websocket') return json({ error: 'expected_websocket' }, 426);
+@@ -118,6 +199,7 @@ export default {
+         const h = new Headers(req.headers);
+         h.set('x-rc-admin', admin ? '1' : '0');
+         h.set('x-rc-ip', ip);
++        if (!admin && (await registry(env).isBanned(url.searchParams.get('uid'), ip))) h.set('x-rc-banned', '1');
+         return roomStub(env, id).fetch(new Request(req.url, { headers: h }));
+       }
+ 
+@@ -131,22 +213,54 @@ export default {
+ 
+ async function adminApi(req, env, path) {
+   const reg = registry(env);
++  const body = req.method === 'POST' ? await req.json().catch(() => ({})) : {};
+ 
+   if (path === '/api/admin/state' && req.method === 'GET') {
+     const ids = await reg.list();
+     const rooms = (await Promise.all(ids.map((id) => roomStub(env, id).info()))).filter(Boolean);
+-    return json({ open: await reg.getOpen(), rooms, config: conf(env) });
++    return json({
++      open: await reg.getOpen(),
++      rooms,
++      bans: await reg.listBans(),
++      settings: effectiveSettings(env, await reg.getSettings()),
++      settingsSpec: SETTINGS,
++      turn: Boolean(env.TURN_KEY_ID && env.TURN_KEY_API_TOKEN),
++    });
+   }
+ 
+   if (path === '/api/admin/open' && req.method === 'POST') {
+-    const { open } = await req.json().catch(() => ({}));
+-    const v = await reg.setOpen(Boolean(open));
++    const v = await reg.setOpen(Boolean(body.open));
+     openCache = { v, t: Date.now() };
+     // 关站时结束所有房间
+     if (!v) await Promise.all((await reg.list()).map((id) => roomStub(env, id).end('closed')));
+     return json({ open: v });
+   }
+ 
++  if (path === '/api/admin/settings' && req.method === 'POST') {
++    const clean = {};
++    for (const [k, s] of Object.entries(SETTINGS)) {
++      const n = Number(body[k]);
++      if (Number.isFinite(n)) clean[k] = Math.min(s.max, Math.max(s.min, Math.round(n)));
++    }
++    await reg.setSettings(clean);
++    return json({ settings: effectiveSettings(env, await reg.getSettings()) });
++  }
++
++  if (path === '/api/admin/ban' && req.method === 'POST') {
++    const uid = UID_RE.test(body.uid || '') ? body.uid : '';
++    const ip = clip(body.ip, 64);
++    if (!uid && !ip) return json({ error: 'bad_request' }, 400);
++    await reg.ban({ uid, ip, name: clip(body.name, 24) });
++    const ids = await reg.list();
++    await Promise.all(ids.map((id) => roomStub(env, id).kick({ uid, ip })));
++    return json({ ok: true });
++  }
++
++  if (path === '/api/admin/unban' && req.method === 'POST') {
++    await reg.unban(clip(body.key, 120));
++    return json({ ok: true });
++  }
++
+   if (path === '/api/admin/rooms/end-all' && req.method === 'POST') {
+     const ids = await reg.list();
+     await Promise.all(ids.map((id) => roomStub(env, id).end('admin')));
+@@ -169,7 +283,7 @@ async function adminApi(req, env, path) {
+ export class Room extends DurableObject {
+   constructor(ctx, env) {
+     super(ctx, env);
+-    this.c = conf(env);
++    this.c = baseConf(env);
+   }
+ 
+   getMeta() {
+@@ -181,8 +295,13 @@ export class Room extends DurableObject {
+   members() {
+     return this.ctx.getWebSockets('m');
+   }
++  // 房间创建时把当时的后台设置固定下来，之后改设置只影响新房间
++  cfg(meta) {
++    const s = meta?.settings || {};
++    return { idleMs: num(s.idleMinutes, 30) * 60e3, maxMembers: num(s.maxMembers, 10), maxFileMB: num(s.maxFileMB, 100) };
++  }
+ 
+-  async init(id) {
++  async init(id, settings) {
+     if (await this.getMeta()) return { ok: false };
+     const now = Date.now();
+     const meta = {
+@@ -193,6 +312,7 @@ export class Room extends DurableObject {
+       lastActivity: now,
+       emptySince: now,
+       everJoined: false,
++      settings,
+     };
+     await this.putMeta(meta);
+     await this.schedule(meta);
+@@ -208,10 +328,16 @@ export class Room extends DurableObject {
+       state: meta.state,
+       reason: meta.reason || null,
+       locked: meta.locked,
+-      full: count >= this.c.maxMembers,
++      full: count >= this.cfg(meta).maxMembers,
+     };
+   }
+ 
++  async hasToken(token) {
++    const meta = await this.getMeta();
++    if (!meta || meta.state !== 'open') return false;
++    return ((await this.ctx.storage.get('tokens')) || []).includes(token);
++  }
++
+   async info() {
+     const meta = await this.getMeta();
+     if (!meta) return null;
+@@ -222,6 +348,18 @@ export class Room extends DurableObject {
+     return { ...meta, members };
+   }
+ 
++  presence(except) {
++    const list = this.members().filter((s) => s.deserializeAttachment()?.cid !== except);
++    const uids = list.map((s) => s.deserializeAttachment()?.uid).filter(Boolean);
++    const out = JSON.stringify({ type: 'presence', count: list.length, uids });
++    for (const s of list) {
++      try {
++        s.send(out);
++      } catch { }
++    }
++    return list.length;
++  }
++
+   // ----- WebSocket 接入 -----
+   async fetch(req) {
+     const pair = new WebSocketPair();
+@@ -233,6 +371,7 @@ export class Room extends DurableObject {
+       return new Response(null, { status: 101, webSocket: client });
+     };
+ 
++    if (req.headers.get('x-rc-banned') === '1') return reject('banned');
+     const meta = await this.getMeta();
+     if (!meta) return reject('not_found');
+     if (meta.state !== 'open') return reject('ended');
+@@ -242,9 +381,10 @@ export class Room extends DurableObject {
+     const rt = url.searchParams.get('rt') || '';
+     const tokens = (await this.ctx.storage.get('tokens')) || [];
+     const returning = Boolean(rt) && tokens.includes(rt);
++    const cfg = this.cfg(meta);
+ 
+     if (meta.locked && !returning && !admin) return reject('locked');
+-    if (!returning && !admin && this.members().length >= this.c.maxMembers) return reject('full');
++    if (!returning && !admin && this.members().length >= cfg.maxMembers) return reject('full');
+ 
+     const token = returning ? rt : crypto.randomUUID();
+     if (!returning) {
+@@ -274,11 +414,12 @@ export class Room extends DurableObject {
+         type: 'welcome',
+         token,
+         locked: meta.locked,
+-        idleMs: this.c.idleMs,
++        idleMs: cfg.idleMs,
++        maxFileMB: cfg.maxFileMB,
+         lastActivity: meta.lastActivity,
+       }),
+     );
+-    this.broadcast({ type: 'presence', count: this.members().length });
++    this.presence();
+     return new Response(null, { status: 101, webSocket: client });
+   }
+ 
+@@ -357,21 +498,42 @@ export class Room extends DurableObject {
+   async onLeave(ws) {
+     const meta = await this.getMeta();
+     if (!meta || meta.state !== 'open') return;
+-    const leaving = ws.deserializeAttachment()?.cid;
+-    const left = this.members().filter((s) => s.deserializeAttachment()?.cid !== leaving);
+-    const out = JSON.stringify({ type: 'presence', count: left.length });
+-    for (const s of left) {
+-      try {
+-        s.send(out);
+-      } catch { }
+-    }
+-    if (left.length === 0 && !meta.emptySince) {
++    const left = this.presence(ws.deserializeAttachment()?.cid);
++    if (left === 0 && !meta.emptySince) {
+       meta.emptySince = Date.now();
+       await this.putMeta(meta);
+       await this.schedule(meta);
+     }
+   }
+ 
++  // 管理员封禁：断开匹配的连接，并通知其他人断开与他们的直连
++  async kick({ uid, ip }) {
++    const hit = [];
++    for (const s of this.members()) {
++      const a = s.deserializeAttachment();
++      if (!a || a.admin) continue;
++      if ((uid && a.uid === uid) || (ip && a.ip === ip)) {
++        hit.push(a);
++        try {
++          s.send(JSON.stringify({ type: 'reject', reason: 'banned' }));
++          s.close(4003, 'banned');
++        } catch { }
++      }
++    }
++    if (!hit.length) return 0;
++    const out = JSON.stringify({ type: 'kicked', uids: hit.map((a) => a.uid) });
++    for (const s of this.members()) {
++      const a = s.deserializeAttachment();
++      if (a && !hit.some((h) => h.cid === a.cid)) {
++        try {
++          s.send(out);
++        } catch { }
++      }
++    }
++    this.presence(hit.length === 1 ? hit[0].cid : undefined);
++    return hit.length;
++  }
++
+   broadcast(obj) {
+     const out = JSON.stringify(obj);
+     for (const s of this.members()) {
+@@ -386,7 +548,7 @@ export class Room extends DurableObject {
+     let at;
+     if (meta.state === 'ended') at = meta.endedAt + this.c.tombstoneMs;
+     else if (meta.emptySince) at = meta.emptySince + (meta.everJoined ? this.c.emptyGraceMs : this.c.unjoinedMs);
+-    else at = meta.lastActivity + this.c.idleMs;
++    else at = meta.lastActivity + this.cfg(meta).idleMs;
+     await this.ctx.storage.setAlarm(at);
+   }
+ 
+@@ -408,7 +570,7 @@ export class Room extends DurableObject {
+       if (now >= limit) return this.end(meta.everJoined ? 'empty' : 'unused');
+     } else {
+       meta.emptySince = null;
+-      if (now >= meta.lastActivity + this.c.idleMs) return this.end('idle');
++      if (now >= meta.lastActivity + this.cfg(meta).idleMs) return this.end('idle');
+     }
+     await this.putMeta(meta);
+     await this.schedule(meta);
+@@ -434,13 +596,12 @@ export class Room extends DurableObject {
+ }
+ 
+ // =====================================================================
+-// Registry：全局唯一实例 —— 站点开关、活跃房间列表、建房限流
++// Registry：全局唯一实例 —— 站点开关、房间列表、设置、封禁、限流
+ // =====================================================================
+ export class Registry extends DurableObject {
+   constructor(ctx, env) {
+     super(ctx, env);
+-    this.c = conf(env);
+-    this.recent = new Map(); // ip -> [时间戳]，仅内存，重启清零
++    this.recent = new Map(); // 建房限流：ip -> [时间戳]，仅内存
+   }
+ 
+   async getOpen() {
+@@ -451,16 +612,39 @@ export class Registry extends DurableObject {
+     return Boolean(v);
+   }
+ 
+-  reserve(ip, admin) {
+-    if (admin) return true;
++  async getSettings() {
++    return (await this.ctx.storage.get('settings')) || {};
++  }
++  async setSettings(s) {
++    await this.ctx.storage.put('settings', { ...(await this.getSettings()), ...s });
++  }
++
++  // 建房前的检查：封禁 + 限流，并返回当前生效的设置
++  async createGate(ip, uid, admin) {
++    const settings = effectiveSettings(this.env, await this.getSettings());
++    if (admin) return { ok: true, settings };
++    if (await this.isBanned(uid, ip)) return { ok: false, reason: 'banned' };
+     const now = Date.now();
+     const list = (this.recent.get(ip) || []).filter((t) => now - t < 600e3);
+-    if (list.length >= this.c.createLimit) return false;
++    if (list.length >= settings.createLimit) return { ok: false, reason: 'rate_limited' };
+     list.push(now);
+     this.recent.set(ip, list);
+-    return true;
++    return { ok: true, settings };
++  }
++
++  // TURN 凭证签发限流：每个 IP 每 10 分钟最多 ICE_LIMIT 次
++  async iceGate(ip, uid) {
++    if (await this.isBanned(uid, ip)) return { ok: false, reason: 'banned' };
++    const now = Date.now();
++    const key = `ice:${ip}`;
++    const list = (this.recent.get(key) || []).filter((t) => now - t < 600e3);
++    if (list.length >= ICE_LIMIT) return { ok: false, reason: 'rate_limited' };
++    list.push(now);
++    this.recent.set(key, list);
++    return { ok: true };
+   }
+ 
++  // ----- 房间列表 -----
+   async add(id) {
+     await this.ctx.storage.put(`room:${id}`, Date.now());
+   }
+@@ -471,4 +655,42 @@ export class Registry extends DurableObject {
+     const map = await this.ctx.storage.list({ prefix: 'room:' });
+     return [...map.keys()].map((k) => k.slice(5));
+   }
+-}
+\ No newline at end of file
++
++  // ----- 封禁 -----
++  async ban({ uid, ip, name }) {
++    const at = Date.now();
++    if (uid) await this.ctx.storage.put(`ban:uid:${uid}`, { at, name, ip });
++    if (ip) await this.ctx.storage.put(`ban:ip:${ip}`, { at, name, uid });
++  }
++  async unban(key) {
++    if (key.startsWith('ban:')) await this.ctx.storage.delete(key);
++  }
++  async isBanned(uid, ip) {
++    const keys = [];
++    if (uid && UID_RE.test(uid)) keys.push(`ban:uid:${uid}`);
++    if (ip) keys.push(`ban:ip:${ip}`);
++    if (!keys.length) return false;
++    return (await this.ctx.storage.get(keys)).size > 0;
++  }
++  async listBans() {
++    const map = await this.ctx.storage.list({ prefix: 'ban:' });
++    return [...map.entries()].map(([key, v]) => ({ key, ...v }));
++  }
++
++  // ----- 管理员登录限流（持久化，重启不清零） -----
++  async loginAllowed(ip) {
++    const rec = await this.ctx.storage.get(`login:${ip}`);
++    if (!rec) return true;
++    if (Date.now() - rec.first > LOGIN_WINDOW_MS) return true;
++    return rec.fails < LOGIN_MAX_FAILS;
++  }
++  async loginResult(ip, ok) {
++    const key = `login:${ip}`;
++    if (ok) return this.ctx.storage.delete(key);
++    const now = Date.now();
++    let rec = await this.ctx.storage.get(key);
++    if (!rec || now - rec.first > LOGIN_WINDOW_MS) rec = { first: now, fails: 0 };
++    rec.fails += 1;
++    await this.ctx.storage.put(key, rec);
++  }
++}
+diff --git a/web/app.js b/web/app.js
+index 8e66f28..915649e 100644
+--- a/web/app.js
++++ b/web/app.js
+@@ -2,21 +2,25 @@ import { Conn, joinRoom } from './relay.js';
+ import { identityFor, loadSelf } from './identity.js';
+ 
+ const APP_ID = 'roomchat';
+-
+-// ICE 服务器：只用 Cloudflare STUN（国内一般可达）。不用 Google STUN，否则在它不可达的网络里
+-// 每次建连都要等 ICE 收集超时（Trystero 默认 15 秒）。以后加 TURN 也在这里追加。
+-// 调试：localStorage.rc_ice 可写入 JSON 数组覆盖（本地测试用 '[]'）。
+-const ICE_SERVERS = (() => {
+-  try {
+-    const o = JSON.parse(localStorage.getItem('rc_ice'));
+-    if (Array.isArray(o)) return o;
+-  } catch {}
+-  return [{ urls: 'stun:stun.cloudflare.com:3478' }];
+-})();
++const ALPHA = '0123456789abcdefghjkmnpqrstvwxyz';
+ const ID_RE = /^[0-9a-hjkmnp-tv-z]{6}$/;
+ const MAX_LEN = 4000;
++const AUTO_FETCH_BYTES = 5 * 1024 * 1024; // 5 MB 以下的图片自动下载
++const SYNC_LIMIT = 200;
+ const normalizeId = (s) =>
+   String(s || '').toLowerCase().replace(/[^0-9a-z]/g, '').replace(/o/g, '0').replace(/[il]/g, '1');
++const randomId = () => [...crypto.getRandomValues(new Uint8Array(6))].map((b) => ALPHA[b & 31]).join('');
++
++// 调试：localStorage.rc_ice 写入 JSON 数组可覆盖 ICE 服务器（本地测试用 '[]'）
++const ICE_OVERRIDE = (() => {
++  try {
++    const o = JSON.parse(localStorage.getItem('rc_ice'));
++    return Array.isArray(o) ? o : null;
++  } catch {
++    return null;
++  }
++})();
++const DEFAULT_ICE = [{ urls: 'stun:stun.cloudflare.com:3478' }];
+ 
+ const $ = (sel) => document.querySelector(sel);
+ const el = (tag, cls, text) => {
+@@ -37,31 +41,28 @@ let locked = false;
+ let ended = false;
+ let synced = false;
+ let lastActivitySent = 0;
+-let present = 1; // 信令服务器上的在线人数（含自己），用来发现"有人在但连不上"
++let maxFileBytes = 100 * 1024 * 1024;
++let presentUids = []; // 信令服务器上的在线成员（含自己），用来发现"有人在但连不上"
+ let stuckTimer = 0;
++let unread = 0;
+ const peers = new Map(); // Trystero peerId -> 身份
+-const messages = []; // 按时间排序的聊天消息
++const messages = []; // 按时间排序的消息（文字和媒体）
+ const nodes = new Map(); // 消息 id -> DOM 节点
++const files = new Map(); // 媒体 id -> { blob, url }
++const loading = new Map(); // 媒体 id -> { peerId, timer }
+ 
+ // 回房令牌：锁定的房间里刷新页面还能回来
+ const tokenKey = (id) => `rc_rt_${id}`;
+-const getToken = (id) => {
++const store = (fn) => {
+   try {
+-    return sessionStorage.getItem(tokenKey(id));
++    return fn();
+   } catch {
+     return null;
+   }
+ };
+-const setToken = (id, t) => {
+-  try {
+-    sessionStorage.setItem(tokenKey(id), t);
+-  } catch {}
+-};
+-const clearToken = (id) => {
+-  try {
+-    sessionStorage.removeItem(tokenKey(id));
+-  } catch {}
+-};
++const getToken = (id) => store(() => sessionStorage.getItem(tokenKey(id)));
++const setToken = (id, t) => store(() => sessionStorage.setItem(tokenKey(id), t));
++const clearToken = (id) => store(() => sessionStorage.removeItem(tokenKey(id)));
+ 
+ const endedText = (reason, by) =>
+   ({
+@@ -74,16 +75,17 @@ const endedText = (reason, by) =>
+   })[reason] || '房间已结束。';
+ 
+ // ---------- 状态页 ----------
+-function showScreen(title, text, { newRoom = false, rejoin = false } = {}) {
++function showScreen(title, text, { home = false, rejoin = false } = {}) {
+   document.body.dataset.view = 'screen';
+   $('#screen-title').textContent = title;
+   $('#screen-text').textContent = text;
+-  $('#screen-new').hidden = !newRoom;
++  $('#screen-home').hidden = !home;
+   $('#screen-rejoin').hidden = !rejoin;
+   document.title = title;
+ }
+ 
+ const showClosed = () => showScreen('网站维护中', '暂时无法创建或加入房间，请稍后再来。');
++const showBanned = () => showScreen('无法进入', '你已被管理员禁止创建或加入房间。');
+ const showNoWebRTC = () =>
+   showScreen(
+     '浏览器禁用了直连',
+@@ -96,52 +98,83 @@ async function api(path, opts) {
+     let body = {};
+     try {
+       body = await r.json();
+-    } catch {}
++    } catch { }
+     return { status: r.status, ok: r.ok, body };
+   } catch {
+     return { status: 0, ok: false, body: {} };
+   }
+ }
++const post = (path, data) =>
++  api(path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(data || {}) });
+ 
+ // ---------- 启动 ----------
++let isAdmin = false;
++
+ async function boot() {
+   const st = await api('/api/status');
+   if (!st.ok) return showScreen('无法连接', '服务器暂时连不上，请稍后刷新重试。');
+-  if (!st.body.open && !st.body.admin) return showClosed();
++  isAdmin = Boolean(st.body.admin);
++  if (!st.body.open && !isAdmin) return showClosed();
+   if (typeof RTCPeerConnection === 'undefined') return showNoWebRTC();
+ 
+   const raw = decodeURIComponent(location.pathname.slice(1));
+-  if (!raw) {
+-    const r = await api('/api/rooms', { method: 'POST' });
+-    if (r.body.error === 'closed') return showClosed();
+-    if (r.status === 429) return showScreen('创建太频繁', '请过几分钟再新建房间。');
+-    if (!r.ok) return showScreen('创建失败', '请刷新页面重试。');
+-    history.replaceState(null, '', `/${r.body.id}`);
+-    return enter(r.body.id);
+-  }
++  if (!raw) return showHome();
+ 
+   const id = normalizeId(raw);
+-  if (!ID_RE.test(id)) return showScreen('房间不存在', '检查一下链接是否完整，或者新建一个房间。', { newRoom: true });
++  if (!ID_RE.test(id)) return showScreen('房间不存在', '检查一下链接是否完整，或者回到首页新建一个房间。', { home: true });
+   if (id !== raw) history.replaceState(null, '', `/${id}`);
+ 
+   const r = await api(`/api/rooms/${id}`);
+   if (r.body.error === 'closed') return showClosed();
+   if (!r.ok) return showScreen('无法连接', '服务器暂时连不上，请稍后刷新重试。');
+   const s = r.body;
+-  if (!s.exists) return showScreen('房间不存在', '检查一下链接是否完整，或者新建一个房间。', { newRoom: true });
+-  if (s.state === 'ended') return showScreen('房间已结束', endedText(s.reason, ''), { newRoom: true });
++  if (!s.exists) return showScreen('房间不存在', '检查一下链接是否完整，或者回到首页新建一个房间。', { home: true });
++  if (s.state === 'ended') return showScreen('房间已结束', endedText(s.reason, ''), { home: true });
+   // 管理员可以进入锁定或已满的房间（服务端同样放行）
+-  const returning = Boolean(getToken(id)) || st.body.admin;
+-  if (s.locked && !returning) return showScreen('房间已锁定', '房间里的人暂时不允许新成员加入。', { newRoom: true });
+-  if (s.full && !returning) return showScreen('房间已满', '这个房间的人数已达上限。', { newRoom: true });
++  const returning = Boolean(getToken(id)) || isAdmin;
++  if (s.locked && !returning) return showScreen('房间已锁定', '房间里的人暂时不允许新成员加入。', { home: true });
++  if (s.full && !returning) return showScreen('房间已满', '这个房间的人数已达上限。', { home: true });
+   enter(id);
+ }
+ 
++// ---------- 首页：预先生成一个房间号 ----------
++function showHome() {
++  document.body.dataset.view = 'home';
++  document.title = '开一个临时聊天室';
++  const input = $('#home-id');
++  input.value = randomId();
++  $('#home-me').replaceChildren(avatar(me, 'lg'), el('span', '', `你会以「${me.name}」的身份进入`));
++  input.focus();
++  input.select();
++}
++
++async function homeGo() {
++  const err = $('#home-err');
++  err.textContent = '';
++  const id = normalizeId($('#home-id').value);
++  if (!ID_RE.test(id)) return (err.textContent = '房间号是 6 位字母或数字。');
++  const btn = $('#home-go');
++  btn.disabled = true;
++  const r = await post('/api/rooms', { id, uid: me.uid });
++  btn.disabled = false;
++  if (r.ok) return location.assign(`/${r.body.id}`);
++  const e = r.body.error;
++  if (e === 'closed') return showClosed();
++  if (e === 'banned') return showBanned();
++  err.textContent =
++    {
++      ended: '这个房间号刚用过，房间已经结束了，换一个吧。',
++      taken: '这个房间号刚被人占用了，换一个吧。',
++      rate_limited: '新建房间太频繁了，请过几分钟再试。',
++      bad_id: '房间号是 6 位字母或数字。',
++    }[e] || '没能进入房间，请稍后再试。';
++}
++
+ // ---------- 进入房间 ----------
+ function enter(id) {
+   roomId = id;
+   document.body.dataset.view = 'chat';
+-  document.title = `房间 ${id}`;
++  updateTitle();
+   $('#room-code').textContent = id;
+   renderMembers();
+   system(`你是「${me.name}」。把链接发给朋友，他们打开就能加入。`);
+@@ -154,66 +187,83 @@ function enter(id) {
+   });
+   conn.addEventListener('data', (e) => onControl(e.detail));
+   conn.addEventListener('down', () => {
+-    if (!ended && !conn.final) banner('与服务器的连接断了，正在重连。已经连上的人仍可以继续聊天。');
++    if (!ended && !conn.final) banner('与服务器的连接断了，正在重连。已经连上的人仍可以继续聊天。', 'down');
+   });
+-  conn.addEventListener('up', () => banner(''));
+-
+-  try {
+-    startP2P();
+-  } catch (err) {
+-    console.error('[p2p] init failed', err);
+-    teardown();
+-    return showNoWebRTC();
+-  }
++  conn.addEventListener('up', () => $('#banner').dataset.kind === 'down' && banner(''));
+   $('#input').focus();
+ }
+ 
+-function onControl(m) {
++async function onControl(m) {
+   switch (m.type) {
+     case 'welcome':
+       setToken(roomId, m.token);
+       setLocked(m.locked);
++      if (m.maxFileMB) maxFileBytes = m.maxFileMB * 1024 * 1024;
+       if (m.idleMs) $('#hint').textContent = `${Math.round(m.idleMs / 60000)} 分钟没有新消息，房间会自动结束。`;
++      if (!room) {
++        const ice = await loadIce(m.token);
++        if (ended || room) return;
++        try {
++          startP2P(ice);
++        } catch (err) {
++          console.error('[p2p] init failed', err);
++          teardown();
++          showNoWebRTC();
++        }
++      }
+       return;
+     case 'presence':
+-      present = Math.max(1, Number(m.count) || 1);
++      presentUids = Array.isArray(m.uids) ? m.uids.filter((u) => typeof u === 'string') : [];
+       renderMembers();
+       return;
+     case 'state':
+       setLocked(m.locked);
+       system(m.locked ? `${m.by || '有人'}禁止了新人加入。` : `${m.by || '有人'}重新允许新人加入。`);
+       return;
++    case 'kicked':
++      dropUids(m.uids || []);
++      return;
+     case 'ended':
+       teardown();
+-      showScreen('房间已结束', endedText(m.reason, m.by), { newRoom: true });
++      showScreen('房间已结束', endedText(m.reason, m.by), { home: true });
+       return;
+     case 'reject': {
+       teardown();
++      if (m.reason === 'banned') return showBanned();
+       const t = {
+         locked: ['房间已锁定', '房间里的人暂时不允许新成员加入。'],
+         full: ['房间已满', '这个房间的人数已达上限。'],
+         ended: ['房间已结束', '这个房间已经结束了。'],
+-        not_found: ['房间不存在', '检查一下链接是否完整，或者新建一个房间。'],
++        not_found: ['房间不存在', '检查一下链接是否完整，或者回到首页新建一个房间。'],
+       }[m.reason] || ['无法加入', '请稍后再试。'];
+-      showScreen(t[0], t[1], { newRoom: true });
++      showScreen(t[0], t[1], { home: true });
+     }
+   }
+ }
+ 
++// TURN 凭证由服务端签发，只给房间成员；失败时退回只用 STUN
++async function loadIce(token) {
++  if (ICE_OVERRIDE) return ICE_OVERRIDE;
++  const r = await post('/api/ice', { room: roomId, token, uid: me.uid });
++  if (r.ok && Array.isArray(r.body.iceServers) && r.body.iceServers.length) return r.body.iceServers;
++  return DEFAULT_ICE;
++}
++
+ // ---------- P2P ----------
+-function startP2P() {
++function startP2P(iceServers) {
+   // trickleIce: false —— 绕过 Trystero 0.25.x 的 offer 过期问题（约 57 秒后新人连不上）
+   room = joinRoom(
+-    { appId: APP_ID, relayConfig: { conn }, trickleIce: false, rtcConfig: { iceServers: ICE_SERVERS } },
++    { appId: APP_ID, relayConfig: { conn }, trickleIce: false, rtcConfig: { iceServers } },
+     roomId,
+-    {
+-      onJoinError: (e) => console.warn('[p2p]', e.error),
+-    },
++    { onJoinError: (e) => console.warn('[p2p]', e.error) },
+   );
+   const hello = room.makeAction('hello');
+   const chat = room.makeAction('chat');
+-  const sync = room.makeAction('sync', { kind: 'request', onRequest: () => messages.slice(-300) });
+-  act = { hello, chat, sync };
++  const sync = room.makeAction('sync', { kind: 'request', onRequest: () => messages.slice(-SYNC_LIMIT) });
++  const has = room.makeAction('has', { kind: 'request', onRequest: (d) => Boolean(d && files.has(d.id)) });
++  const want = room.makeAction('want');
++  const blob = room.makeAction('blob');
++  act = { hello, chat, sync, has, want, blob };
+ 
+   hello.onMessage = (d, { peerId }) => {
+     if (!d || typeof d.uid !== 'string' || !/^[a-z0-9]{10,32}$/.test(d.uid)) return;
+@@ -223,84 +273,287 @@ function startP2P() {
+     renderMembers();
+     if (!known && who.uid !== me.uid) system(`${who.name}加入了`);
+   };
+-  chat.onMessage = (d) => receive(d);
++  chat.onMessage = (d) => receive(d, true);
++
++  // 有人要某个文件：有就发给他
++  want.onMessage = (d, { peerId }) => {
++    const f = d && files.get(d.id);
++    if (f) blob.send(f.blob, { target: peerId, metadata: { id: d.id } }).catch(() => { });
++  };
++  blob.onReceiveProgress = (p, { metadata }) => metadata && progress(metadata.id, p);
++  blob.onMessage = (data, { metadata }) => {
++    const id = metadata && metadata.id;
++    const msg = id && messages.find((x) => x.id === id && x.type === 'media');
++    if (!msg || files.has(id)) return;
++    const b = data instanceof Blob ? data : new Blob([data], { type: msg.mime });
++    if (b.size > maxFileBytes * 1.05) return;
++    const typed = b.type === msg.mime ? b : new Blob([b], { type: msg.mime });
++    clearTimeout(loading.get(id)?.timer);
++    loading.delete(id);
++    files.set(id, { blob: typed, url: URL.createObjectURL(typed) });
++    renderMediaState(id);
++  };
+ 
+   room.onPeerJoin = (peerId) => {
+     hello.send({ uid: me.uid }, { target: peerId });
+     if (!synced) {
+       synced = true;
+       sync
+-        .request({}, { target: peerId, timeoutMs: 8000 })
+-        .then((list) => Array.isArray(list) && list.forEach(receive))
++        .request({}, { target: peerId, timeoutMs: 15000 })
++        .then((list) => Array.isArray(list) && list.forEach((m) => receive(m, false)))
+         .catch(() => (synced = false));
+     }
+   };
+   room.onPeerLeave = (peerId) => {
+     const who = peers.get(peerId);
+     peers.delete(peerId);
++    if (peers.size === 0) synced = false;
+     renderMembers();
+     if (who && ![...peers.values()].some((p) => p.uid === who.uid)) system(`${who.name}离开了`);
++    // 正在从这个人那里下载的文件：换一个来源
++    for (const [id, l] of loading) if (l.peerId === peerId) retryFetch(id);
+   };
+ }
+ 
++function dropUids(uids) {
++  const all = room?.getPeers() || {};
++  for (const [pid, who] of [...peers]) {
++    if (!uids.includes(who.uid)) continue;
++    try {
++      all[pid]?.close();
++    } catch { }
++    peers.delete(pid);
++    system(`${who.name}已被管理员移出房间`);
++  }
++  renderMembers();
++}
++
+ function teardown() {
+   if (ended) return;
+   ended = true;
+   clearTimeout(stuckTimer);
+   try {
+     room?.leave();
+-  } catch {}
++  } catch { }
+   conn?.close();
++  for (const f of files.values()) URL.revokeObjectURL(f.url);
++  for (const l of loading.values()) clearTimeout(l.timer);
++  files.clear();
++  loading.clear();
+   messages.length = 0;
+   nodes.clear();
+   peers.clear();
+   $('#log').replaceChildren();
++  closeViewer();
+   clearToken(roomId);
+ }
+ 
+ // ---------- 消息 ----------
+-function receive(m) {
+-  if (
+-    !m ||
+-    typeof m.id !== 'string' ||
+-    typeof m.uid !== 'string' ||
+-    typeof m.text !== 'string' ||
+-    !Number.isFinite(m.ts) ||
+-    nodes.has(m.id)
+-  )
+-    return;
+-  const msg = { id: m.id.slice(0, 40), uid: m.uid.slice(0, 32), ts: m.ts, text: m.text.slice(0, MAX_LEN) };
++const MEDIA_RE = /^(image|audio|video)\/[\w.+-]{1,80}$/;
++const kindOf = (mime) => (mime.startsWith('image/') ? 'image' : mime.startsWith('video/') ? 'video' : 'audio');
++
++function clean(m) {
++  if (!m || typeof m.id !== 'string' || typeof m.uid !== 'string' || !Number.isFinite(m.ts)) return null;
++  const base = { id: m.id.slice(0, 40), uid: m.uid.slice(0, 32), ts: m.ts };
++  if (m.type === 'media') {
++    if (typeof m.mime !== 'string' || !MEDIA_RE.test(m.mime) || m.mime === 'image/svg+xml') return null;
++    if (!Number.isFinite(m.size) || m.size <= 0 || m.size > maxFileBytes * 1.05) return null;
++    const thumb =
++      typeof m.thumb === 'string' && m.thumb.startsWith('data:image/jpeg;base64,') && m.thumb.length < 200000
++        ? m.thumb
++        : '';
++    return {
++      ...base,
++      type: 'media',
++      mime: m.mime,
++      kind: kindOf(m.mime),
++      name: String(m.name || '').slice(0, 120) || '未命名',
++      size: m.size,
++      thumb,
++      w: Number(m.w) || 0,
++      h: Number(m.h) || 0,
++    };
++  }
++  if (typeof m.text !== 'string') return null;
++  return { ...base, type: 'text', text: m.text.slice(0, MAX_LEN) };
++}
++
++function receive(raw, live) {
++  const msg = clean(raw);
++  if (!msg || nodes.has(msg.id)) return;
+   let i = messages.length;
+   while (i > 0 && messages[i - 1].ts > msg.ts) i--;
+   messages.splice(i, 0, msg);
+   renderMessage(msg, messages[i - 1], messages[i + 1]);
++  if (live && msg.uid !== me.uid) notify(msg);
++  if (msg.type === 'media' && msg.kind === 'image' && msg.size <= AUTO_FETCH_BYTES) fetchMedia(msg.id);
+ }
+ 
+ function send() {
+   const input = $('#input');
+   const text = input.value.replace(/\s+$/, '');
+   if (!text.trim() || ended) return;
+-  if (!act) return banner('直连功能没有启动成功，消息发不出去。请刷新页面重试。');
+-  const m = { id: crypto.randomUUID(), uid: me.uid, ts: Date.now(), text: text.slice(0, MAX_LEN) };
+-  receive(m);
++  if (!act) return banner('直连功能还没准备好，请稍等片刻再发。', 'notready');
++  const m = { type: 'text', id: crypto.randomUUID(), uid: me.uid, ts: Date.now(), text: text.slice(0, MAX_LEN) };
++  receive(m, false);
+   act.chat.send(m);
+   input.value = '';
+   autosize();
++  pingActivity();
++}
++
++function pingActivity() {
+   const now = Date.now();
+   if (now - lastActivitySent > 20000 && conn.send({ type: 'activity' })) lastActivitySent = now;
+ }
+ 
++// ---------- 媒体：先广播"公告"，别人需要时再按需拉取 ----------
++async function sendFiles(list) {
++  for (const file of list) {
++    if (ended) return;
++    if (!act) return banner('直连功能还没准备好，请稍等片刻再发。', 'notready');
++    if (!MEDIA_RE.test(file.type) || file.type === 'image/svg+xml') {
++      banner(`「${file.name}」不是图片、音频或视频，没有发送。`, 'file');
++      continue;
++    }
++    if (file.size > maxFileBytes) {
++      banner(`「${file.name}」超过 ${fmtSize(maxFileBytes)} 的上限，没有发送。`, 'file');
++      continue;
++    }
++    const kind = kindOf(file.type);
++    const t = await makeThumb(file, kind).catch(() => null);
++    const m = {
++      type: 'media',
++      id: crypto.randomUUID(),
++      uid: me.uid,
++      ts: Date.now(),
++      mime: file.type,
++      name: file.name,
++      size: file.size,
++      thumb: t?.data || '',
++      w: t?.w || 0,
++      h: t?.h || 0,
++    };
++    files.set(m.id, { blob: file, url: URL.createObjectURL(file) });
++    receive(m, false);
++    act.chat.send(m);
++    pingActivity();
++  }
++}
++
++// 缩略图：最长边 320 像素的 JPEG
++async function makeThumb(file, kind) {
++  let source;
++  let w;
++  let h;
++  if (kind === 'image') {
++    source = await createImageBitmap(file);
++    w = source.width;
++    h = source.height;
++  } else if (kind === 'video') {
++    source = await videoFrame(file);
++    w = source.videoWidth;
++    h = source.videoHeight;
++  } else return null;
++  const scale = Math.min(1, 320 / Math.max(w, h));
++  const c = document.createElement('canvas');
++  c.width = Math.max(1, Math.round(w * scale));
++  c.height = Math.max(1, Math.round(h * scale));
++  c.getContext('2d').drawImage(source, 0, 0, c.width, c.height);
++  if (source.close) source.close();
++  if (source.src) URL.revokeObjectURL(source.src);
++  return { data: c.toDataURL('image/jpeg', 0.72), w, h };
++}
++
++function videoFrame(file) {
++  return new Promise((resolve, reject) => {
++    const v = document.createElement('video');
++    v.muted = true;
++    v.playsInline = true;
++    v.preload = 'auto';
++    const timer = setTimeout(() => reject(new Error('timeout')), 5000);
++    v.onloadeddata = () => {
++      v.currentTime = Math.min(0.5, (v.duration || 1) / 2);
++    };
++    v.onseeked = () => {
++      clearTimeout(timer);
++      resolve(v);
++    };
++    v.onerror = () => {
++      clearTimeout(timer);
++      reject(new Error('video'));
++    };
++    v.src = URL.createObjectURL(file);
++  });
++}
++
++async function fetchMedia(id, exclude = []) {
++  if (files.has(id) || (loading.has(id) && !exclude.length) || !act) return;
++  const msg = messages.find((x) => x.id === id);
++  if (!msg) return;
++  // 优先找原发送者，其次问房间里谁有这个文件
++  const ids = Object.keys(room.getPeers()).filter((p) => !exclude.includes(p));
++  let source = ids.find((p) => peers.get(p)?.uid === msg.uid);
++  if (!source && ids.length) {
++    const res = await act.has.requestMany({ id }, { targets: ids, timeoutMs: 5000 }).catch(() => []);
++    const ok = res.filter((r) => r.status === 'fulfilled' && r.value === true).map((r) => r.peerId);
++    source = ok[Math.floor(Math.random() * ok.length)];
++  }
++  if (!source) {
++    loading.delete(id);
++    return renderMediaState(id, '发送者已离开，房间里也没有其他人有这个文件。');
++  }
++  const timer = setTimeout(() => retryFetch(id), 30000);
++  loading.set(id, { peerId: source, timer, tried: [...exclude, source], p: 0 });
++  renderMediaState(id);
++  act.want.send({ id }, { target: source });
++}
++
++function retryFetch(id) {
++  const l = loading.get(id);
++  if (!l || files.has(id)) return;
++  clearTimeout(l.timer);
++  fetchMedia(id, l.tried);
++}
++
++function progress(id, p) {
++  const l = loading.get(id);
++  if (!l) return;
++  l.p = p;
++  clearTimeout(l.timer);
++  l.timer = setTimeout(() => retryFetch(id), 30000);
++  renderMediaState(id);
++}
++
+ // ---------- 渲染 ----------
+ const timeFmt = new Intl.DateTimeFormat('zh-CN', { hour: '2-digit', minute: '2-digit' });
++const fmtSize = (n) =>
++  n < 1024 * 1024 ? `${Math.max(1, Math.round(n / 1024))} KB` : `${(n / 1024 / 1024).toFixed(n < 10 * 1024 * 1024 ? 1 : 0)} MB`;
+ 
+ function avatar(who, size = '') {
+-  const d = el('span', `dot ${size}`, who.initial);
++  const d = el('span', `dot ${size}`, who.emoji);
+   d.style.background = who.color;
+-  d.style.color = who.ink;
+   d.title = who.name;
+   return d;
+ }
+ 
++const URL_RE = /https?:\/\/[^\s<>"'，。！？、）)\]]+/g;
++function linkify(text) {
++  const p = el('p', 'text');
++  let last = 0;
++  for (const m of text.matchAll(URL_RE)) {
++    if (m.index > last) p.append(text.slice(last, m.index));
++    const a = el('a', '', m[0]);
++    a.href = m[0];
++    a.target = '_blank';
++    a.rel = 'noopener noreferrer nofollow';
++    p.append(a);
++    last = m.index + m[0].length;
++  }
++  if (last < text.length) p.append(text.slice(last));
++  return p;
++}
++
+ function renderMessage(msg, prev, next) {
+   const who = identityFor(msg.uid);
+   const mine = msg.uid === me.uid;
+@@ -312,7 +565,15 @@ function renderMessage(msg, prev, next) {
+   const body = el('div', 'body');
+   const meta = el('div', 'meta');
+   meta.append(el('span', 'name', mine ? '我' : who.name), el('time', 'time', timeFmt.format(msg.ts)));
+-  body.append(meta, el('p', 'text', msg.text));
++  if (msg.type === 'text') {
++    const copy = el('button', 'copy', '复制');
++    copy.type = 'button';
++    copy.onclick = () => copyText(msg.text, copy);
++    meta.append(copy);
++    body.append(meta, linkify(msg.text));
++  } else {
++    body.append(meta, mediaCard(msg));
++  }
+   row.append(body);
+   nodes.set(msg.id, row);
+ 
+@@ -324,6 +585,104 @@ function renderMessage(msg, prev, next) {
+   if (stick || mine) log.scrollTop = log.scrollHeight;
+ }
+ 
++async function copyText(text, btn) {
++  try {
++    await navigator.clipboard.writeText(text);
++    btn.textContent = '已复制';
++  } catch {
++    btn.textContent = '复制失败';
++  }
++  setTimeout(() => (btn.textContent = '复制'), 1500);
++}
++
++function mediaCard(msg) {
++  const card = el('div', `media ${msg.kind}`);
++  card.dataset.id = msg.id;
++  if (msg.kind !== 'audio' && msg.w && msg.h) card.style.aspectRatio = `${msg.w} / ${msg.h}`;
++  fillMedia(card, msg);
++  return card;
++}
++
++function renderMediaState(id, error = '') {
++  const card = nodes.get(id)?.querySelector('.media');
++  const msg = messages.find((x) => x.id === id);
++  if (card && msg) fillMedia(card, msg, error);
++}
++
++function fillMedia(card, msg, error = '') {
++  const f = files.get(msg.id);
++  const l = loading.get(msg.id);
++  const parts = [];
++  const info = el('div', 'media-info');
++  info.append(el('span', 'media-name', msg.name), el('span', 'media-size', fmtSize(msg.size)));
++
++  if (f) {
++    const playable = msg.kind === 'image' || document.createElement(msg.kind).canPlayType(msg.mime) !== '';
++    if (msg.kind === 'image') {
++      const img = el('img');
++      img.src = f.url;
++      img.alt = msg.name;
++      img.onclick = () => openViewer(f.url, msg.name);
++      parts.push(img);
++    } else if (playable) {
++      const media = el(msg.kind);
++      media.src = f.url;
++      media.controls = true;
++      media.preload = 'metadata';
++      if (msg.kind === 'video') media.playsInline = true;
++      if (card.dataset.autoplay) media.autoplay = true;
++      parts.push(media);
++    } else {
++      parts.push(el('p', 'media-note', '这个格式浏览器放不了，可以保存到本地用其他软件打开。'));
++    }
++    const save = el('a', 'media-save', '保存');
++    save.href = f.url;
++    save.download = msg.name;
++    info.append(save);
++  } else {
++    if (msg.thumb) {
++      const img = el('img', 'thumb');
++      img.src = msg.thumb;
++      img.alt = '';
++      parts.push(img);
++    } else if (msg.kind === 'audio') {
++      parts.push(el('div', 'media-icon', '♪'));
++    }
++    if (l) {
++      const bar = el('div', 'bar');
++      const fill = el('i');
++      fill.style.width = `${Math.round((l.p || 0) * 100)}%`;
++      bar.append(fill);
++      parts.push(bar);
++      info.append(el('span', 'media-state', l.p ? `${Math.round(l.p * 100)}%` : '请求中'));
++    } else {
++      const btn = el('button', 'media-load', msg.kind === 'image' ? '加载图片' : '播放');
++      btn.type = 'button';
++      btn.onclick = () => {
++        card.dataset.autoplay = '1';
++        fetchMedia(msg.id);
++      };
++      parts.push(btn);
++      if (error) info.append(el('span', 'media-state err', error));
++    }
++  }
++  card.replaceChildren(...parts, info);
++}
++
++// 图片查看：在页面内放大（不在新标签打开 blob，避免同源执行风险）
++function openViewer(url, alt) {
++  const v = $('#viewer');
++  const img = v.querySelector('img');
++  img.src = url;
++  img.alt = alt;
++  v.hidden = false;
++}
++function closeViewer() {
++  const v = $('#viewer');
++  v.hidden = true;
++  v.querySelector('img').removeAttribute('src');
++}
++
+ function system(text) {
+   const log = $('#log');
+   log.append(el('p', 'sys', text));
+@@ -331,29 +690,32 @@ function system(text) {
+ }
+ 
+ function renderMembers() {
+-  const box = $('#members');
+-  const list = [me];
+-  for (const p of peers.values()) if (!list.some((x) => x.uid === p.uid)) list.push(p);
+-  box.replaceChildren(
+-    ...list.map((w, i) => {
+-      const d = avatar(w, 'lg');
+-      if (i === 0) d.classList.add('self');
+-      return d;
+-    }),
+-    el('span', 'count', countText(1 + peers.size)),
+-  );
+-  watchStuck(1 + peers.size);
+-}
+-
+-function countText(connected) {
+-  const pending = present - connected;
+-  if (pending <= 0) return `${connected} 人在房间里`;
+-  return `${present} 人在房间里，其中 ${pending} 人正在连接`;
++  const connected = new Map([[me.uid, me]]);
++  for (const p of peers.values()) connected.set(p.uid, p);
++  const pending = [...new Set(presentUids)].filter((u) => !connected.has(u)).map(identityFor);
++
++  const dots = [...connected.values()].map((w, i) => {
++    const d = avatar(w, 'lg');
++    if (i === 0) d.classList.add('self');
++    return d;
++  });
++  for (const w of pending) {
++    const d = avatar(w, 'lg');
++    d.classList.add('pending');
++    d.title = `${w.name}（正在连接）`;
++    dots.push(d);
++  }
++  const total = connected.size + pending.length;
++  const count = pending.length
++    ? `${total} 人在房间里，其中 ${pending.length} 人正在连接`
++    : `${total} 人在房间里`;
++  $('#members').replaceChildren(...dots, el('span', 'count', count));
++  watchStuck(pending.length);
+ }
+ 
+ // 信令显示有人、但 20 秒内 P2P 仍没连上：多半是浏览器或网络限制了 WebRTC
+-function watchStuck(connected) {
+-  if (present <= connected) {
++function watchStuck(pending) {
++  if (!pending) {
+     clearTimeout(stuckTimer);
+     stuckTimer = 0;
+     if ($('#banner').dataset.kind === 'stuck') banner('');
+@@ -362,7 +724,7 @@ function watchStuck(connected) {
+   if (stuckTimer) return;
+   stuckTimer = setTimeout(() => {
+     stuckTimer = 0;
+-    if (ended || present <= 1 + peers.size) return;
++    if (ended || !$('.members .pending')) return;
+     banner(
+       '有人在房间里，但一直没能和你直连上，所以互相收不到消息。常见原因：某一方的浏览器扩展或隐私设置限制了 WebRTC，或者网络不允许直连。',
+       'stuck',
+@@ -391,6 +753,34 @@ function autosize() {
+   t.style.height = `${Math.min(t.scrollHeight, 160)}px`;
+ }
+ 
++// ---------- 提醒：标题未读数 + 可选的系统通知 ----------
++const notifyOn = () => store(() => localStorage.getItem('rc_notify')) === '1' && 'Notification' in window;
++
++function updateTitle() {
++  document.title = `${unread ? `(${unread}) ` : ''}房间 ${roomId}`;
++}
++
++function notify(msg) {
++  if (!document.hidden) return;
++  unread += 1;
++  updateTitle();
++  if (notifyOn() && Notification.permission === 'granted') {
++    const who = identityFor(msg.uid);
++    const body = msg.type === 'text' ? msg.text.slice(0, 80) : `发来一个${{ image: '图片', video: '视频', audio: '音频' }[msg.kind]}`;
++    try {
++      new Notification(who.name, { body, tag: `room-${roomId}` });
++    } catch { }
++  }
++}
++
++function renderBell() {
++  const b = $('#bell');
++  if (!('Notification' in window)) return (b.hidden = true);
++  const on = notifyOn() && Notification.permission === 'granted';
++  b.textContent = on ? '通知已开' : '开启通知';
++  b.setAttribute('aria-pressed', String(on));
++}
++
+ // ---------- 事件 ----------
+ function bind() {
+   const input = $('#input');
+@@ -401,7 +791,33 @@ function bind() {
+       send();
+     }
+   });
++  input.addEventListener('paste', (e) => {
++    const list = [...(e.clipboardData?.files || [])];
++    if (list.length) {
++      e.preventDefault();
++      sendFiles(list);
++    }
++  });
+   $('#send').addEventListener('click', send);
++  $('#attach').addEventListener('click', () => $('#file').click());
++  $('#file').addEventListener('change', (e) => {
++    sendFiles([...e.target.files]);
++    e.target.value = '';
++  });
++  const chat = $('.chat');
++  chat.addEventListener('dragover', (e) => {
++    if ([...e.dataTransfer.types].includes('Files')) {
++      e.preventDefault();
++      chat.classList.add('dropping');
++    }
++  });
++  chat.addEventListener('dragleave', (e) => e.target === chat && chat.classList.remove('dropping'));
++  chat.addEventListener('drop', (e) => {
++    chat.classList.remove('dropping');
++    if (!e.dataTransfer.files.length) return;
++    e.preventDefault();
++    sendFiles([...e.dataTransfer.files]);
++  });
+ 
+   $('#copy-link').addEventListener('click', async (e) => {
+     const btn = e.currentTarget;
+@@ -416,24 +832,55 @@ function bind() {
+   });
+ 
+   $('#lock').addEventListener('click', () => {
+-    if (!conn?.send({ type: 'lock', value: !locked })) banner('暂时连不上服务器，稍后再试。');
++    if (!conn?.send({ type: 'lock', value: !locked })) banner('暂时连不上服务器，稍后再试。', 'down');
+   });
+ 
+   $('#end').addEventListener('click', () => {
+     if (!confirm('结束后所有人都会被移出，聊天记录全部清除。确定结束房间吗？')) return;
+-    if (!conn?.send({ type: 'end' })) banner('暂时连不上服务器，稍后再试。');
++    if (!conn?.send({ type: 'end' })) banner('暂时连不上服务器，稍后再试。', 'down');
+   });
+ 
+   $('#leave').addEventListener('click', () => {
+     const id = roomId;
+     teardown();
+-    showScreen('你已离开房间', '房间还在继续。只要房间没有锁定，重新打开链接就能回来。', {
+-      newRoom: true,
+-      rejoin: true,
+-    });
++    showScreen('你已离开房间', '房间还在继续。只要房间没有锁定，重新打开链接就能回来。', { home: true, rejoin: true });
+     $('#screen-rejoin').onclick = () => location.assign(`/${id}`);
+   });
++
++  $('#bell').addEventListener('click', async () => {
++    if (notifyOn() && Notification.permission === 'granted') {
++      store(() => localStorage.setItem('rc_notify', '0'));
++    } else {
++      const p = Notification.permission === 'default' ? await Notification.requestPermission() : Notification.permission;
++      if (p !== 'granted') banner('浏览器没有允许通知，可以在网站设置里打开。', 'notify');
++      store(() => localStorage.setItem('rc_notify', p === 'granted' ? '1' : '0'));
++    }
++    renderBell();
++  });
++  renderBell();
++
++  $('#viewer').addEventListener('click', closeViewer);
++  document.addEventListener('keydown', (e) => e.key === 'Escape' && closeViewer());
++
++  // 回到前台 / 网络恢复：清未读，立刻重连信令
++  const wake = () => {
++    if (document.hidden || !roomId || ended) return;
++    unread = 0;
++    updateTitle();
++    conn?.reconnectNow();
++  };
++  document.addEventListener('visibilitychange', wake);
++  window.addEventListener('online', wake);
++  window.addEventListener('focus', wake);
++
++  // 首页
++  $('#home-shuffle').addEventListener('click', () => {
++    $('#home-id').value = randomId();
++    $('#home-err').textContent = '';
++  });
++  $('#home-go').addEventListener('click', homeGo);
++  $('#home-id').addEventListener('keydown', (e) => e.key === 'Enter' && homeGo());
+ }
+ 
+ bind();
+-boot();
+\ No newline at end of file
++boot();
+diff --git a/web/emoji.js b/web/emoji.js
+new file mode 100644
+index 0000000..370f06d
+--- /dev/null
++++ b/web/emoji.js
+@@ -0,0 +1,3 @@
++// 头像 emoji：来自 unicode-emoji-json 0.9.0，除旗帜外的全部分组。
++// 过滤条件：Emoji 12.0 及以前（老系统也能显示）、不含 ZWJ 组合、不含键帽数字、只取默认肤色。
++export const EMOJI = "😀 😃 😄 😁 😆 😅 🤣 😂 🙂 🙃 😉 😊 😇 🥰 😍 🤩 😘 😗 ☺️ 😚 😙 😋 😛 😜 🤪 😝 🤑 🤗 🤭 🤫 🤔 🤐 🤨 😐 😑 😶 😏 😒 🙄 😬 🤥 😌 😔 😪 🤤 😴 😷 🤒 🤕 🤢 🤮 🤧 🥵 🥶 🥴 😵 🤯 🤠 🥳 😎 🤓 🧐 😕 😟 🙁 ☹️ 😮 😯 😲 😳 🥺 😦 😧 😨 😰 😥 😢 😭 😱 😖 😣 😞 😓 😩 😫 🥱 😤 😡 😠 🤬 😈 👿 💀 ☠️ 💩 🤡 👹 👺 👻 👽 👾 🤖 😺 😸 😹 😻 😼 😽 🙀 😿 😾 🙈 🙉 🙊 💌 💘 💝 💖 💗 💓 💞 💕 💟 ❣️ 💔 ❤️ 🧡 💛 💚 💙 💜 🤎 🖤 🤍 💋 💯 💢 💥 💫 💦 💨 🕳️ 💬 🗨️ 🗯️ 💭 💤 👋 🤚 🖐️ ✋ 🖖 👌 🤏 ✌️ 🤞 🤟 🤘 🤙 👈 👉 👆 🖕 👇 ☝️ 👍 👎 ✊ 👊 🤛 🤜 👏 🙌 👐 🤲 🤝 🙏 ✍️ 💅 🤳 💪 🦾 🦿 🦵 🦶 👂 🦻 👃 🧠 🦷 🦴 👀 👁️ 👅 👄 👶 🧒 👦 👧 🧑 👱 👨 🧔 👩 🧓 👴 👵 🙍 🙎 🙅 🙆 💁 🙋 🧏 🙇 🤦 🤷 👮 🕵️ 💂 👷 🤴 👸 👳 👲 🧕 🤵 👰 🤰 🤱 👼 🎅 🤶 🦸 🦹 🧙 🧚 🧛 🧜 🧝 🧞 🧟 💆 💇 🚶 🧍 🧎 🏃 💃 🕺 🕴️ 👯 🧖 🧗 🤺 🏇 ⛷️ 🏂 🏌️ 🏄 🚣 🏊 ⛹️ 🏋️ 🚴 🚵 🤸 🤼 🤽 🤾 🤹 🧘 🛀 🛌 👭 👫 👬 💏 💑 🗣️ 👤 👥 👪 👣 🐵 🐒 🦍 🦧 🐶 🐕 🦮 🐩 🐺 🦊 🦝 🐱 🐈 🦁 🐯 🐅 🐆 🐴 🐎 🦄 🦓 🦌 🐮 🐂 🐃 🐄 🐷 🐖 🐗 🐽 🐏 🐑 🐐 🐪 🐫 🦙 🦒 🐘 🦏 🦛 🐭 🐁 🐀 🐹 🐰 🐇 🐿️ 🦔 🦇 🐻 🐨 🐼 🦥 🦦 🦨 🦘 🦡 🐾 🦃 🐔 🐓 🐣 🐤 🐥 🐦 🐧 🕊️ 🦅 🦆 🦢 🦉 🦩 🦚 🦜 🐸 🐊 🐢 🦎 🐍 🐲 🐉 🦕 🦖 🐳 🐋 🐬 🐟 🐠 🐡 🦈 🐙 🐚 🦀 🦞 🦐 🦑 🦪 🐌 🦋 🐛 🐜 🐝 🐞 🦗 🕷️ 🕸️ 🦂 🦟 🦠 💐 🌸 💮 🏵️ 🌹 🥀 🌺 🌻 🌼 🌷 🌱 🌲 🌳 🌴 🌵 🌾 🌿 ☘️ 🍀 🍁 🍂 🍃 🍄 🍇 🍈 🍉 🍊 🍋 🍌 🍍 🥭 🍎 🍏 🍐 🍑 🍒 🍓 🥝 🍅 🥥 🥑 🍆 🥔 🥕 🌽 🌶️ 🥒 🥬 🥦 🧄 🧅 🥜 🌰 🍞 🥐 🥖 🥨 🥯 🥞 🧇 🧀 🍖 🍗 🥩 🥓 🍔 🍟 🍕 🌭 🥪 🌮 🌯 🥙 🧆 🥚 🍳 🥘 🍲 🥣 🥗 🍿 🧈 🧂 🥫 🍱 🍘 🍙 🍚 🍛 🍜 🍝 🍠 🍢 🍣 🍤 🍥 🥮 🍡 🥟 🥠 🥡 🍦 🍧 🍨 🍩 🍪 🎂 🍰 🧁 🥧 🍫 🍬 🍭 🍮 🍯 🍼 🥛 ☕ 🍵 🍶 🍾 🍷 🍸 🍹 🍺 🍻 🥂 🥃 🥤 🧃 🧉 🧊 🥢 🍽️ 🍴 🥄 🔪 🏺 🌍 🌎 🌏 🌐 🗺️ 🗾 🧭 🏔️ ⛰️ 🌋 🗻 🏕️ 🏖️ 🏜️ 🏝️ 🏞️ 🏟️ 🏛️ 🏗️ 🧱 🏘️ 🏚️ 🏠 🏡 🏢 🏣 🏤 🏥 🏦 🏨 🏩 🏪 🏫 🏬 🏭 🏯 🏰 💒 🗼 🗽 ⛪ 🕌 🛕 🕍 ⛩️ 🕋 ⛲ ⛺ 🌁 🌃 🏙️ 🌄 🌅 🌆 🌇 🌉 ♨️ 🎠 🎡 🎢 💈 🎪 🚂 🚃 🚄 🚅 🚆 🚇 🚈 🚉 🚊 🚝 🚞 🚋 🚌 🚍 🚎 🚐 🚑 🚒 🚓 🚔 🚕 🚖 🚗 🚘 🚙 🚚 🚛 🚜 🏎️ 🏍️ 🛵 🦽 🦼 🛺 🚲 🛴 🛹 🚏 🛣️ 🛤️ 🛢️ ⛽ 🚨 🚥 🚦 🛑 🚧 ⚓ ⛵ 🛶 🚤 🛳️ ⛴️ 🛥️ 🚢 ✈️ 🛩️ 🛫 🛬 🪂 💺 🚁 🚟 🚠 🚡 🛰️ 🚀 🛸 🛎️ 🧳 ⌛ ⏳ ⌚ ⏰ ⏱️ ⏲️ 🕰️ 🕛 🕧 🕐 🕜 🕑 🕝 🕒 🕞 🕓 🕟 🕔 🕠 🕕 🕡 🕖 🕢 🕗 🕣 🕘 🕤 🕙 🕥 🕚 🕦 🌑 🌒 🌓 🌔 🌕 🌖 🌗 🌘 🌙 🌚 🌛 🌜 🌡️ ☀️ 🌝 🌞 🪐 ⭐ 🌟 🌠 🌌 ☁️ ⛅ ⛈️ 🌤️ 🌥️ 🌦️ 🌧️ 🌨️ 🌩️ 🌪️ 🌫️ 🌬️ 🌀 🌈 🌂 ☂️ ☔ ⛱️ ⚡ ❄️ ☃️ ⛄ ☄️ 🔥 💧 🌊 🎃 🎄 🎆 🎇 🧨 ✨ 🎈 🎉 🎊 🎋 🎍 🎎 🎏 🎐 🎑 🧧 🎀 🎁 🎗️ 🎟️ 🎫 🎖️ 🏆 🏅 🥇 🥈 🥉 ⚽ ⚾ 🥎 🏀 🏐 🏈 🏉 🎾 🥏 🎳 🏏 🏑 🏒 🥍 🏓 🏸 🥊 🥋 🥅 ⛳ ⛸️ 🎣 🤿 🎽 🎿 🛷 🥌 🎯 🪀 🪁 🔫 🎱 🔮 🎮 🕹️ 🎰 🎲 🧩 🧸 ♠️ ♥️ ♦️ ♣️ ♟️ 🃏 🀄 🎴 🎭 🖼️ 🎨 🧵 🧶 👓 🕶️ 🥽 🥼 🦺 👔 👕 👖 🧣 🧤 🧥 🧦 👗 👘 🥻 🩱 🩲 🩳 👙 👚 👛 👜 👝 🛍️ 🎒 👞 👟 🥾 🥿 👠 👡 🩰 👢 👑 👒 🎩 🎓 🧢 ⛑️ 📿 💄 💍 💎 🔇 🔈 🔉 🔊 📢 📣 📯 🔔 🔕 🎼 🎵 🎶 🎙️ 🎚️ 🎛️ 🎤 🎧 📻 🎷 🎺 🎸 🎹 🎻 🪕 🥁 📱 📲 ☎️ 📞 📟 📠 🔋 🔌 💻 🖥️ 🖨️ ⌨️ 🖱️ 🖲️ 💽 💾 💿 📀 🧮 🎥 🎞️ 📽️ 🎬 📺 📷 📸 📹 📼 🔍 🔎 🕯️ 💡 🔦 🏮 🪔 📔 📕 📖 📗 📘 📙 📚 📓 📒 📃 📜 📄 📰 🗞️ 📑 🔖 🏷️ 💰 💴 💵 💶 💷 💸 💳 🧾 💹 ✉️ 📧 📨 📩 📤 📥 📦 📫 📪 📬 📭 📮 🗳️ ✏️ ✒️ 🖋️ 🖊️ 🖌️ 🖍️ 📝 💼 📁 📂 🗂️ 📅 📆 🗒️ 🗓️ 📇 📈 📉 📊 📋 📌 📍 📎 🖇️ 📏 📐 ✂️ 🗃️ 🗄️ 🗑️ 🔒 🔓 🔏 🔐 🔑 🗝️ 🔨 🪓 ⛏️ ⚒️ 🛠️ 🗡️ ⚔️ 💣 🏹 🛡️ 🔧 🔩 ⚙️ 🗜️ ⚖️ 🦯 🔗 ⛓️ 🧰 🧲 ⚗️ 🧪 🧫 🧬 🔬 🔭 📡 💉 🩸 💊 🩹 🩺 🚪 🛏️ 🛋️ 🪑 🚽 🚿 🛁 🪒 🧴 🧷 🧹 🧺 🧻 🧼 🧽 🧯 🛒 🚬 ⚰️ ⚱️ 🧿 🗿 🏧 🚮 🚰 ♿ 🚹 🚺 🚻 🚼 🚾 🛂 🛃 🛄 🛅 ⚠️ 🚸 ⛔ 🚫 🚳 🚭 🚯 🚱 🚷 📵 🔞 ☢️ ☣️ ⬆️ ↗️ ➡️ ↘️ ⬇️ ↙️ ⬅️ ↖️ ↕️ ↔️ ↩️ ↪️ ⤴️ ⤵️ 🔃 🔄 🔙 🔚 🔛 🔜 🔝 🛐 ⚛️ 🕉️ ✡️ ☸️ ☯️ ✝️ ☦️ ☪️ ☮️ 🕎 🔯 ♈ ♉ ♊ ♋ ♌ ♍ ♎ ♏ ♐ ♑ ♒ ♓ ⛎ 🔀 🔁 🔂 ▶️ ⏩ ⏭️ ⏯️ ◀️ ⏪ ⏮️ 🔼 ⏫ 🔽 ⏬ ⏸️ ⏹️ ⏺️ ⏏️ 🎦 🔅 🔆 📶 📳 📴 ♀️ ♂️ ✖️ ➕ ➖ ➗ ♾️ ‼️ ⁉️ ❓ ❔ ❕ ❗ 〰️ 💱 💲 ⚕️ ♻️ ⚜️ 🔱 📛 🔰 ⭕ ✅ ☑️ ✔️ ❌ ❎ ➰ ➿ 〽️ ✳️ ✴️ ❇️ ©️ ®️ ™️ 🔟 🔠 🔡 🔢 🔣 🔤 🅰️ 🆎 🅱️ 🆑 🆒 🆓 ℹ️ 🆔 Ⓜ️ 🆕 🆖 🅾️ 🆗 🅿️ 🆘 🆙 🆚 🈁 🈂️ 🈷️ 🈶 🈯 🉐 🈹 🈚 🈲 🉑 🈸 🈴 🈳 ㊗️ ㊙️ 🈺 🈵 🔴 🟠 🟡 🟢 🔵 🟣 🟤 ⚫ ⚪ 🟥 🟧 🟨 🟩 🟦 🟪 🟫 ⬛ ⬜ ◼️ ◻️ ◾ ◽ ▪️ ▫️ 🔶 🔷 🔸 🔹 🔺 🔻 💠 🔘 🔳 🔲".split(" ");
+diff --git a/web/identity.js b/web/identity.js
+index 6c21366..7cc0f65 100644
+--- a/web/identity.js
++++ b/web/identity.js
+@@ -1,3 +1,5 @@
++import { EMOJI } from './emoji.js';
++
+ const ADJ = [
+   '害羞的', '困倦的', '勇敢的', '好奇的', '安静的', '快乐的', '迷糊的', '认真的',
+   '慢吞吞的', '爱笑的', '神秘的', '优雅的', '倔强的', '机灵的', '温柔的', '淡定的',
+@@ -38,7 +40,7 @@ export const identityFor = (uid) => {
+   return {
+     uid,
+     name: ADJ[hash(uid + '#a') % ADJ.length] + animal,
+-    initial: animal[0],
++    emoji: EMOJI[hash(uid + '#e') % EMOJI.length],
+     ...colorFor(uid),
+   };
+ };
+diff --git a/web/relay.js b/web/relay.js
+index 5bb701e..157ffa8 100644
+--- a/web/relay.js
++++ b/web/relay.js
+@@ -39,10 +39,24 @@ export class Conn extends EventTarget {
+       this.dispatchEvent(new Event('down'));
+       if (this.final) return;
+       const delay = Math.min(15000, 1000 * 2 ** this.retry++);
+-      setTimeout(() => this.open(), delay);
++      this.timer = setTimeout(() => this.open(), delay);
+     };
+   }
+ 
++  // 页面回到前台或网络恢复时，不等退避计时，立刻重连
++  reconnectNow() {
++    if (this.final) return;
++    const st = this.ws?.readyState;
++    if (st === WebSocket.OPEN || st === WebSocket.CONNECTING) return;
++    clearTimeout(this.timer);
++    this.retry = 0;
++    this.open();
++  }
++
++  get isOpen() {
++    return this.ws?.readyState === WebSocket.OPEN;
++  }
++
+   send(obj) {
+     if (this.ws?.readyState !== WebSocket.OPEN) return false;
+     this.ws.send(toJson(obj));
+diff --git a/wrangler.jsonc b/wrangler.jsonc
+index 224d4ea..c950ebb 100644
+--- a/wrangler.jsonc
++++ b/wrangler.jsonc
+@@ -23,6 +23,7 @@
+     "UNJOINED_MINUTES": "5",
+     "TOMBSTONE_HOURS": "24",
+     "MAX_MEMBERS": "10",
++    "MAX_FILE_MB": "100",
+     "CREATE_LIMIT_PER_10MIN": "10"
+   },
+   "observability": { "enabled": true }
+-- 
+2.43.0
+
