@@ -46,8 +46,13 @@ const json = (data, status = 200, headers = {}) =>
 
 const clip = (s, n) => String(s ?? '').slice(0, n);
 
-// ---------- 管理员鉴权：HttpOnly cookie 里存 ADMIN_TOKEN ----------
-const COOKIE = 'rc_admin';
+// ---------- 管理员鉴权 ----------
+// cookie 里不存令牌原文，只存"过期时间.签名"，签名 = HMAC-SHA256(ADMIN_TOKEN, 过期时间)。
+// 服务端无需存储会话；更换 ADMIN_TOKEN 后所有旧会话立即失效。
+const COOKIE = 'rc_admin_s';
+const LEGACY_COOKIE = 'rc_admin'; // 旧版存令牌原文的 cookie，登录/退出时顺手清掉
+const SESSION_DAYS = 30;
+const enc = new TextEncoder();
 const readCookie = (req, name) => {
   const m = (req.headers.get('cookie') || '').match(new RegExp(`(?:^|;\\s*)${name}=([^;]+)`));
   return m ? decodeURIComponent(m[1]) : null;
@@ -58,9 +63,37 @@ const safeEqual = (a, b) => {
   const y = enc.encode(b);
   return x.length === y.length && crypto.subtle.timingSafeEqual(x, y);
 };
-const isAdmin = (req, env) => {
-  const t = readCookie(req, COOKIE);
-  return Boolean(t && env.ADMIN_TOKEN && safeEqual(t, env.ADMIN_TOKEN));
+let hmacKey = { secret: null, key: null }; // 每个隔离实例缓存导入好的密钥
+const sign = async (secret, msg) => {
+  if (hmacKey.secret !== secret) {
+    const key = await crypto.subtle.importKey('raw', enc.encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+    hmacKey = { secret, key };
+  }
+  const sig = new Uint8Array(await crypto.subtle.sign('HMAC', hmacKey.key, enc.encode(`yacr-admin:${msg}`)));
+  return btoa(String.fromCharCode(...sig)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+};
+const makeSession = async (env) => {
+  const exp = Date.now() + SESSION_DAYS * 86400e3;
+  return `${exp}.${await sign(env.ADMIN_TOKEN, exp)}`;
+};
+const isAdmin = async (req, env) => {
+  const value = readCookie(req, COOKIE);
+  if (!value || !env.ADMIN_TOKEN) return false;
+  const [exp, sig] = value.split('.');
+  if (!/^\d{13}$/.test(exp || '') || Number(exp) <= Date.now() || !sig) return false;
+  return safeEqual(sig, await sign(env.ADMIN_TOKEN, exp));
+};
+const cookieHeaders = (session) => {
+  const h = new Headers();
+  const attrs = 'Path=/; HttpOnly; Secure; SameSite=Strict';
+  h.append('set-cookie', session ? `${COOKIE}=${session}; ${attrs}; Max-Age=${SESSION_DAYS * 86400}` : `${COOKIE}=; ${attrs}; Max-Age=0`);
+  h.append('set-cookie', `${LEGACY_COOKIE}=; ${attrs}; Max-Age=0`);
+  return h;
+};
+const jsonWith = (data, headers) => {
+  const r = json(data);
+  for (const [k, v] of headers) r.headers.append(k, v);
+  return r;
 };
 
 const registry = (env) => env.REGISTRY.get(env.REGISTRY.idFromName('global'));
@@ -115,7 +148,7 @@ export default {
     const origin = req.headers.get('origin');
     if (origin && origin !== url.origin) return json({ error: 'forbidden_origin' }, 403);
 
-    const admin = isAdmin(req, env);
+    const admin = await isAdmin(req, env);
     const ip = req.headers.get('cf-connecting-ip') || 'unknown';
 
     try {
@@ -130,11 +163,10 @@ export default {
         const ok = Boolean(token) && safeEqual(String(token), env.ADMIN_TOKEN);
         await reg.loginResult(ip, ok);
         if (!ok) return json({ error: 'bad_token' }, 401);
-        const cookie = `${COOKIE}=${encodeURIComponent(token)}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=2592000`;
-        return json({ ok: true }, 200, { 'set-cookie': cookie });
+        return jsonWith({ ok: true }, cookieHeaders(await makeSession(env)));
       }
       if (path === '/api/admin/logout' && req.method === 'POST') {
-        return json({ ok: true }, 200, { 'set-cookie': `${COOKIE}=; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=0` });
+        return jsonWith({ ok: true }, cookieHeaders(null));
       }
       if (path.startsWith('/api/admin/')) {
         if (!admin) return json({ error: 'unauthorized' }, 401);
