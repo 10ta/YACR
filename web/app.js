@@ -50,6 +50,8 @@ const messages = []; // 按时间排序的消息（文字和媒体）
 const nodes = new Map(); // 消息 id -> DOM 节点
 const files = new Map(); // 媒体 id -> { blob, url }
 const loading = new Map(); // 媒体 id -> { peerId, timer }
+const links = new Map(); // peerId -> 这个人直连着的 uid 集合（用来决定要不要替别人转发）
+const MAX_HOPS = 3;
 
 // 回房令牌：锁定的房间里刷新页面还能回来
 const tokenKey = (id) => `rc_rt_${id}`;
@@ -274,7 +276,14 @@ function startP2P(iceServers) {
   const has = room.makeAction('has', { kind: 'request', onRequest: (d) => Boolean(d && files.has(d.id)) });
   const want = room.makeAction('want');
   const blob = room.makeAction('blob');
-  act = { hello, chat, sync, has, want, blob };
+  const linkAct = room.makeAction('links');
+  act = { hello, chat, sync, has, want, blob, links: linkAct };
+
+  // 各自告诉大家"我直连着谁"，转发时就只转给和原发送者没直连的人
+  linkAct.onMessage = (d, { peerId }) => {
+    const uids = Array.isArray(d?.uids) ? d.uids.filter((u) => typeof u === 'string').slice(0, 50) : [];
+    links.set(peerId, new Set(uids));
+  };
 
   hello.onMessage = (d, { peerId }) => {
     if (!d || typeof d.uid !== 'string' || !/^[a-z0-9]{10,32}$/.test(d.uid)) return;
@@ -282,9 +291,13 @@ function startP2P(iceServers) {
     const who = identityFor(d.uid);
     peers.set(peerId, who);
     renderMembers();
+    announceLinks();
     if (!known && who.uid !== me.uid) system(`${who.name}加入了`);
   };
-  chat.onMessage = (d) => receive(d, true);
+  chat.onMessage = (d, { peerId }) => {
+    const msg = receive(d, true);
+    if (msg) relay(msg, Number(d.hop) || 0, peerId);
+  };
 
   // 有人要某个文件：有就发给他
   want.onMessage = (d, { peerId }) => {
@@ -318,12 +331,36 @@ function startP2P(iceServers) {
   room.onPeerLeave = (peerId) => {
     const who = peers.get(peerId);
     peers.delete(peerId);
+    links.delete(peerId);
+    announceLinks();
     if (peers.size === 0) synced = false;
     renderMembers();
     if (who && ![...peers.values()].some((p) => p.uid === who.uid)) system(`${who.name}离开了`);
     // 正在从这个人那里下载的文件：换一个来源
     for (const [id, l] of loading) if (l.peerId === peerId) retryFetch(id);
   };
+}
+
+// ---------- 替别人转发：A 和 C 没连上、但都连着 B 时，由 B 把消息转过去 ----------
+let linksTimer = 0;
+function announceLinks() {
+  clearTimeout(linksTimer);
+  linksTimer = setTimeout(() => {
+    if (!act || ended) return;
+    const uids = [...new Set([...peers.values()].map((p) => p.uid))];
+    act.links.send({ uids }).catch(() => { });
+  }, 300);
+}
+
+function relay(msg, hop, fromPeer) {
+  if (!act || hop >= MAX_HOPS || msg.uid === me.uid) return;
+  const targets = Object.keys(room.getPeers()).filter((pid) => {
+    if (pid === fromPeer) return false;
+    const who = peers.get(pid);
+    if (!who || who.uid === msg.uid) return false; // 还没握手，或者他就是原发送者
+    return !links.get(pid)?.has(msg.uid); // 他已经直连原发送者，就不用转了
+  });
+  if (targets.length) act.chat.send({ ...msg, hop: hop + 1 }, { target: targets }).catch(() => { });
 }
 
 function dropUids(uids) {
@@ -351,6 +388,7 @@ function teardown() {
   for (const l of loading.values()) clearTimeout(l.timer);
   files.clear();
   loading.clear();
+  links.clear();
   messages.length = 0;
   nodes.clear();
   peers.clear();
@@ -391,13 +429,14 @@ function clean(m) {
 
 function receive(raw, live) {
   const msg = clean(raw);
-  if (!msg || nodes.has(msg.id)) return;
+  if (!msg || nodes.has(msg.id)) return null;
   let i = messages.length;
   while (i > 0 && messages[i - 1].ts > msg.ts) i--;
   messages.splice(i, 0, msg);
   renderMessage(msg, messages[i - 1], messages[i + 1]);
   if (live && msg.uid !== me.uid) notify(msg);
   if (msg.type === 'media' && msg.kind === 'image' && msg.size <= AUTO_FETCH_BYTES) fetchMedia(msg.id);
+  return msg;
 }
 
 function send() {
@@ -512,7 +551,11 @@ async function fetchMedia(id, exclude = []) {
   }
   if (!source) {
     loading.delete(id);
-    return renderMediaState(id, '发送者已离开，房间里也没有其他人有这个文件。');
+    const senderHere = presentUids.includes(msg.uid);
+    return renderMediaState(
+      id,
+      senderHere ? '你和发送者之间没能直连，暂时取不到这个文件。' : '发送者已离开，房间里也没有其他人有这个文件。',
+    );
   }
   const timer = setTimeout(() => retryFetch(id), 30000);
   loading.set(id, { peerId: source, timer, tried: [...exclude, source], p: 0 });
@@ -731,7 +774,9 @@ function watchStuck(pending) {
     stuckTimer = 0;
     if (ended || !$('.members .pending')) return;
     banner(
-      '有人在房间里，但一直没能和你直连上，所以互相收不到消息。常见原因：某一方的浏览器扩展或隐私设置限制了 WebRTC，或者网络不允许直连。',
+      peers.size
+        ? '有人没能和你直连。你们之间的文字消息会经由其他成员转发，但图片和视频可能取不到。'
+        : '有人在房间里，但一直没能和你直连上，所以互相收不到消息。常见原因：某一方的浏览器扩展或隐私设置限制了 WebRTC，或者网络不允许直连。',
       'stuck',
     );
   }, 20000);
