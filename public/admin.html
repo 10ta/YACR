@@ -1,0 +1,159 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="robots" content="noindex, nofollow" />
+    <title>管理后台</title>
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <main class="admin">
+      <div class="admin-head">
+        <h1>管理后台</h1>
+        <div class="admin-row" id="session" hidden>
+          <button class="btn small ghost" id="refresh" type="button">刷新</button>
+          <button class="btn small ghost" id="logout" type="button">退出登录</button>
+        </div>
+      </div>
+
+      <section id="login" hidden>
+        <p>输入部署时设置的 ADMIN_TOKEN。</p>
+        <div class="admin-row">
+          <input type="password" id="token" autocomplete="current-password" aria-label="管理令牌" />
+          <button class="btn" id="login-btn" type="button">登录</button>
+        </div>
+        <p class="err" id="login-err"></p>
+      </section>
+
+      <section id="panel" hidden>
+        <div class="site-state" id="site">
+          <span class="lamp" aria-hidden="true"></span>
+          <div class="grow">
+            <strong id="site-title"></strong>
+            <p id="site-text"></p>
+          </div>
+          <button class="btn" id="site-toggle" type="button"></button>
+        </div>
+
+        <div class="admin-head">
+          <h1 id="rooms-title">活跃房间</h1>
+          <button class="btn small danger" id="end-all" type="button">结束全部房间</button>
+        </div>
+        <table class="rooms">
+          <thead>
+            <tr><th>房间</th><th>成员</th><th>状态</th><th>最后消息</th><th></th></tr>
+          </thead>
+          <tbody id="rooms"></tbody>
+        </table>
+        <p class="empty" id="empty" hidden>现在没有活跃的房间。</p>
+      </section>
+    </main>
+
+    <script>
+      const $ = (s) => document.querySelector(s);
+      const el = (tag, cls, text) => {
+        const n = document.createElement(tag);
+        if (cls) n.className = cls;
+        if (text !== undefined) n.textContent = text;
+        return n;
+      };
+      const ago = (t) => {
+        const s = Math.round((Date.now() - t) / 1000);
+        if (s < 60) return `${s} 秒前`;
+        if (s < 3600) return `${Math.round(s / 60)} 分钟前`;
+        return `${Math.round(s / 3600)} 小时前`;
+      };
+      const post = (path, body) =>
+        fetch(path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body || {}) });
+
+      let state = null;
+
+      async function load() {
+        const r = await fetch('/api/admin/state');
+        if (r.status === 401) {
+          $('#login').hidden = false;
+          $('#panel').hidden = true;
+          $('#session').hidden = true;
+          return;
+        }
+        state = await r.json();
+        $('#login').hidden = true;
+        $('#panel').hidden = false;
+        $('#session').hidden = false;
+        render();
+      }
+
+      function render() {
+        const open = state.open;
+        $('#site').classList.toggle('open', open);
+        $('#site-title').textContent = open ? '站点开放中' : '站点已关闭';
+        $('#site-text').textContent = open
+          ? '任何拿到链接的人都能创建或加入房间。'
+          : '访客只会看到"网站维护中"，你本人不受影响。';
+        $('#site-toggle').textContent = open ? '关闭站点' : '开放站点';
+
+        const tbody = $('#rooms');
+        tbody.replaceChildren();
+        $('#rooms-title').textContent = `活跃房间（${state.rooms.length}）`;
+        $('#empty').hidden = state.rooms.length > 0;
+        $('#end-all').hidden = state.rooms.length === 0;
+
+        for (const room of state.rooms) {
+          const tr = el('tr');
+          const code = el('td');
+          code.append(el('div', 'code', room.id), el('div', 'who', `创建于 ${ago(room.createdAt)}`));
+          const who = el('td');
+          const list = el('div', 'who');
+          if (!room.members.length) list.append(el('span', '', '（没人）'));
+          for (const m of room.members) {
+            const line = el('div', '', m.name || m.uid);
+            line.append(el('span', '', `${m.ip || '未知 IP'}${m.admin ? '（管理员）' : ''}`));
+            list.append(line);
+          }
+          who.append(list);
+          const st = el('td', '', room.locked ? '禁止新人' : '开放');
+          const last = el('td', '', ago(room.lastActivity));
+          const act = el('td');
+          const btn = el('button', 'btn small danger', '结束');
+          btn.type = 'button';
+          btn.onclick = async () => {
+            if (!confirm(`结束房间 ${room.id}？`)) return;
+            await post(`/api/admin/rooms/${room.id}/end`);
+            load();
+          };
+          act.append(btn);
+          tr.append(code, who, st, last, act);
+          tbody.append(tr);
+        }
+      }
+
+      $('#login-btn').onclick = async () => {
+        $('#login-err').textContent = '';
+        const r = await post('/api/admin/login', { token: $('#token').value });
+        if (!r.ok) return ($('#login-err').textContent = '令牌不对。');
+        $('#token').value = '';
+        load();
+      };
+      $('#token').addEventListener('keydown', (e) => e.key === 'Enter' && $('#login-btn').click());
+      $('#logout').onclick = async () => {
+        await post('/api/admin/logout');
+        load();
+      };
+      $('#refresh').onclick = load;
+      $('#site-toggle').onclick = async () => {
+        if (state.open && !confirm('关闭站点会立即结束所有房间，确定吗？')) return;
+        await post('/api/admin/open', { open: !state.open });
+        load();
+      };
+      $('#end-all').onclick = async () => {
+        if (!confirm('结束全部房间？')) return;
+        await post('/api/admin/rooms/end-all');
+        load();
+      };
+
+      load();
+      setInterval(() => !document.hidden && !$('#panel').hidden && load(), 15000);
+    </script>
+  </body>
+</html>

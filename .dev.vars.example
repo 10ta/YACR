@@ -1,0 +1,2 @@
+# 本地开发用的管理员令牌，复制为 .dev.vars 后修改
+ADMIN_TOKEN=change-me-local
