@@ -21,6 +21,17 @@ const hash = (s) => {
   return h;
 };
 
+// 头像颜色：OKLCH 色彩空间，色相 0–359 连续取值，再叠加 4 档明度和 3 档彩度，
+// 可区分的颜色比原来"只变色相"多出一个数量级。浅色头像配深色文字，保证可读。
+const LIGHTNESS = [0.5, 0.58, 0.66, 0.74];
+const CHROMA = [0.12, 0.16, 0.2];
+const colorFor = (uid) => {
+  const l = LIGHTNESS[hash(uid + '#l') % LIGHTNESS.length];
+  const c = CHROMA[hash(uid + '#s') % CHROMA.length];
+  const h = hash(uid + '#c') % 360;
+  return { color: `oklch(${l} ${c} ${h})`, ink: l >= 0.66 ? '#15191f' : '#ffffff' };
+};
+
 export const identityFor = (uid) => {
   const h = hash(uid);
   const animal = ANIMALS[h % ANIMALS.length];
@@ -28,7 +39,7 @@ export const identityFor = (uid) => {
     uid,
     name: ADJ[hash(uid + '#a') % ADJ.length] + animal,
     initial: animal[0],
-    color: `hsl(${hash(uid + '#c') % 360} 58% 46%)`,
+    ...colorFor(uid),
   };
 };
 

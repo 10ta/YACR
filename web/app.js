@@ -130,7 +130,8 @@ async function boot() {
   const s = r.body;
   if (!s.exists) return showScreen('房间不存在', '检查一下链接是否完整，或者新建一个房间。', { newRoom: true });
   if (s.state === 'ended') return showScreen('房间已结束', endedText(s.reason, ''), { newRoom: true });
-  const returning = Boolean(getToken(id));
+  // 管理员可以进入锁定或已满的房间（服务端同样放行）
+  const returning = Boolean(getToken(id)) || st.body.admin;
   if (s.locked && !returning) return showScreen('房间已锁定', '房间里的人暂时不允许新成员加入。', { newRoom: true });
   if (s.full && !returning) return showScreen('房间已满', '这个房间的人数已达上限。', { newRoom: true });
   enter(id);
@@ -295,6 +296,7 @@ const timeFmt = new Intl.DateTimeFormat('zh-CN', { hour: '2-digit', minute: '2-d
 function avatar(who, size = '') {
   const d = el('span', `dot ${size}`, who.initial);
   d.style.background = who.color;
+  d.style.color = who.ink;
   d.title = who.name;
   return d;
 }
@@ -305,6 +307,7 @@ function renderMessage(msg, prev, next) {
   const row = el('article', `msg${mine ? ' mine' : ''}`);
   if (prev && prev.uid === msg.uid && msg.ts - prev.ts < 120000) row.classList.add('cont');
   row.style.setProperty('--who', who.color);
+  row.style.setProperty('--who-ink', who.ink);
   row.append(avatar(who));
   const body = el('div', 'body');
   const meta = el('div', 'meta');

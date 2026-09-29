@@ -114,7 +114,12 @@
           who.append(list);
           const st = el('td', '', room.locked ? '禁止新人' : '开放');
           const last = el('td', '', ago(room.lastActivity));
-          const act = el('td');
+          const act = el('td', 'actions');
+          const enter = el('a', 'btn small ghost', '进入');
+          enter.href = `/${room.id}`;
+          enter.target = '_blank';
+          enter.rel = 'noopener';
+          act.append(enter);
           const btn = el('button', 'btn small danger', '结束');
           btn.type = 'button';
           btn.onclick = async () => {

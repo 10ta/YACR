@@ -148,7 +148,8 @@ body[data-view='loading'] .screen-dots i:nth-child(3) { animation-delay: 0.3s; }
 .msg { display: flex; gap: 10px; margin-top: 14px; align-items: flex-start; }
 .msg .body { max-width: min(78%, 34em); display: flex; flex-direction: column; align-items: flex-start; }
 .msg .meta { display: flex; gap: 8px; align-items: baseline; font-size: 12px; color: var(--muted); margin-bottom: 3px; }
-.msg .name { color: var(--who); font-weight: 600; }
+/* 名字颜色向正文色靠一点，浅色头像的名字在浅背景上也看得清 */
+.msg .name { color: color-mix(in oklch, var(--who) 72%, var(--ink)); font-weight: 600; }
 .msg .text {
   margin: 0;
   padding: 8px 12px;
@@ -165,7 +166,7 @@ body[data-view='loading'] .screen-dots i:nth-child(3) { animation-delay: 0.3s; }
 .msg.mine { flex-direction: row-reverse; }
 .msg.mine .body { align-items: flex-end; }
 .msg.mine .meta { flex-direction: row-reverse; }
-.msg.mine .text { background: var(--who); border-color: var(--who); color: #fff; border-radius: 14px 4px 14px 14px; }
+.msg.mine .text { background: var(--who); border-color: var(--who); color: var(--who-ink, #fff); border-radius: 14px 4px 14px 14px; }
 
 .composer { display: flex; gap: 10px; align-items: flex-end; padding: 12px 20px 4px; border-top: 1px solid var(--line); }
 .composer textarea {
@@ -214,5 +215,7 @@ body[data-view='loading'] .screen-dots i:nth-child(3) { animation-delay: 0.3s; }
 .rooms .code { font-size: 18px; font-weight: 600; letter-spacing: 0.1em; }
 .rooms .who { display: flex; flex-direction: column; gap: 4px; }
 .rooms .who span { display: block; color: var(--muted); font-size: 12px; }
+.rooms .actions { white-space: nowrap; text-align: right; }
+.rooms .actions .btn + .btn { margin-left: 8px; }
 .empty { color: var(--muted); padding: 24px 0; }
 .err { color: var(--danger); font-size: 14px; }
