@@ -66,6 +66,8 @@ export default {
     const path = url.pathname;
     const admin = isAdmin(req, env);
     const ip = req.headers.get('cf-connecting-ip') || '';
+    const origin = req.headers.get('origin');
+    if (origin && origin !== url.origin) return json({ error: 'forbidden_origin' }, 403);
 
     try {
       if (path === '/api/status') return json({ open: await siteOpen(env), admin });
@@ -311,7 +313,7 @@ export class Room extends DurableObject {
           if (a && a.cid !== att.cid && a.topics.includes(topic)) {
             try {
               s.send(out);
-            } catch {}
+            } catch { }
           }
         }
         return;
@@ -343,7 +345,7 @@ export class Room extends DurableObject {
   async webSocketClose(ws, code) {
     try {
       ws.close(code === 1005 ? 1000 : code, 'bye');
-    } catch {}
+    } catch { }
     await this.onLeave(ws);
   }
 
@@ -368,7 +370,7 @@ export class Room extends DurableObject {
     for (const s of this.members()) {
       try {
         s.send(out);
-      } catch {}
+      } catch { }
     }
   }
 
@@ -416,7 +418,7 @@ export class Room extends DurableObject {
       try {
         s.send(out);
         s.close(4001, 'ended');
-      } catch {}
+      } catch { }
     }
     await registry(this.env).remove(meta.id);
     await this.schedule(meta);
