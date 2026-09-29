@@ -46,6 +46,25 @@ const json = (data, status = 200, headers = {}) =>
 
 const clip = (s, n) => String(s ?? '').slice(0, n);
 
+// ---------- 经 VPS 反向代理访问时 ----------
+// ALLOWED_ORIGINS：额外允许的页面来源（反代域名），逗号分隔，如 https://chat.example.com
+// PROXY_SECRET：反代在 X-Yacr-Proxy 头里带上它，才信任 X-Yacr-Client-IP 里的真实访客 IP；
+// 否则所有经反代的访客都会被当成同一个 IP（VPS 的 IP），按 IP 的限流和封禁就全乱了。
+const allowedOrigins = (env) =>
+  String(env.ALLOWED_ORIGINS || '')
+    .split(',')
+    .map((s) => s.trim().replace(/\/+$/, ''))
+    .filter(Boolean);
+const IP_RE = /^[0-9a-f.:]{3,45}$/i;
+const clientIp = (req, env) => {
+  const edge = req.headers.get('cf-connecting-ip') || 'unknown';
+  const secret = env.PROXY_SECRET;
+  if (!secret || !safeEqual(req.headers.get('x-yacr-proxy') || '', secret)) return edge;
+  const real = (req.headers.get('x-yacr-client-ip') || '').trim();
+  if (IP_RE.test(real) && !/^(127\.|::1$|::ffff:127\.)/.test(real)) return real;
+  return `proxy:${edge}`; // 反代没拿到真实 IP（例如前面还有一层本机转发）
+};
+
 // ---------- 管理员鉴权 ----------
 // cookie 里不存令牌原文，只存"过期时间.签名"，签名 = HMAC-SHA256(ADMIN_TOKEN, 过期时间)。
 // 服务端无需存储会话；更换 ADMIN_TOKEN 后所有旧会话立即失效。
@@ -146,10 +165,12 @@ export default {
     const url = new URL(req.url);
     const path = url.pathname;
     const origin = req.headers.get('origin');
-    if (origin && origin !== url.origin) return json({ error: 'forbidden_origin' }, 403);
+    if (origin && origin !== url.origin && !allowedOrigins(env).includes(origin)) {
+      return json({ error: 'forbidden_origin' }, 403);
+    }
 
     const admin = await isAdmin(req, env);
-    const ip = req.headers.get('cf-connecting-ip') || 'unknown';
+    const ip = clientIp(req, env);
 
     try {
       if (path === '/api/status') return json({ ...(await siteState(env)), admin });

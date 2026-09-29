@@ -38,7 +38,7 @@ Yet another chat room：打开即用的临时聊天室。房间号给你生成�
 一个 Cloudflare Worker 同时托管静态页面和一个很小的后端：
 
 - `public/`：静态页面（首页和聊天是同一个页面，另有 `admin.html`）。访问静态文件免费且不触发 Worker。
-- `src/worker.js`：只处理 `/api/*` 和 `/ws/*`，并检查 Origin，只接受本站页面发起的请求。
+- `src/worker.js`：只处理 `/api/*` 和 `/ws/*`，并检查 Origin，只接受本站页面（及 `ALLOWED_ORIGINS` 里的反代域名）发起的请求。
   - `Room`（Durable Object，每个房间一个）：Trystero 信令中继、在线名单、房间锁定、自动结束。
   - `Registry`（Durable Object，全局一个）：站点开关、访客新建开关、活跃房间列表、后台设置、封禁名单、建房 / ICE / 登录限流。
 - `web/`：前端源码，由 `scripts/build.mjs` 打包成 `public/app.js`。
@@ -59,6 +59,22 @@ Yet another chat room：打开即用的临时聊天室。房间号给你生成�
    - 确认自定义域名可用后，在 `wrangler.jsonc` 加上 `"workers_dev": false` 和 `"preview_urls": false`，关闭可以绕过 Access 的默认地址。
 
 之后每次推送到 `main` 都会自动重新部署，Secret 会一直保留。
+
+## 经 VPS 反向代理（改善中国大陆访问）
+
+`*.workers.dev` 在国内基本打不开，Cloudflare 自定义域名直连也常常慢或不稳定。可以让访客访问一个解析到 VPS 的域名，由 VPS 把请求转给 Worker。只有页面和信令经过 VPS，聊天内容仍是浏览器之间直连（或走 TURN），VPS 流量很小。
+
+需要两个域名：
+
+- **源站域名**（如 `o.example.com`）：在 Cloudflare 绑定为 Worker 的自定义域名，管理员从这里进后台，可以用 Cloudflare Access 保护。
+- **访客域名**（如 `chat.example.com`）：DNS 解析到 VPS，**不开 Cloudflare 代理（灰云）**，由 VPS 上的反代转发到源站域名。
+
+Worker 需要两个 Secret（用 Secret 而不是普通变量：值不公开，且不会被自动部署覆盖）：
+
+- `ALLOWED_ORIGINS`：访客域名的完整来源，如 `https://chat.example.com`，多个用逗号分隔。不设置的话，经反代来的请求会被 Origin 检查拒绝。
+- `PROXY_SECRET`：一串随机字符串（`openssl rand -hex 24`）。反代在 `X-Yacr-Proxy` 头里带上它，Worker 才会采信 `X-Yacr-Client-IP` 里的访客真实 IP；否则所有访客都会被当成 VPS 的 IP，按 IP 的限流和封禁会失效或误伤所有人。
+
+反代时要做到：请求头 `Host` 改成源站域名、TLS SNI 用源站域名、覆盖（而不是追加）上面两个头、支持 WebSocket，并且屏蔽 `/admin` 和 `/api/admin/`（后台只从源站域名访问）。如果反代前面还有一层本机转发（例如 sing-box 按 SNI 分流后转给 Caddy），反代看到的来源 IP 会是 `127.0.0.1`，此时需要让前一层把真实 IP 传过来（如 PROXY protocol），否则 Worker 会把这些访客都记为同一个"proxy"IP。
 
 ## TURN 中继
 
