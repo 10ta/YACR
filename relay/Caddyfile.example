@@ -1,0 +1,25 @@
+# 访客域名的 Caddy 配置示例（setup.sh 会按你的参数打印一份填好的）
+# - /relay 开头的请求交给本机的中转服务
+# - 其余请求反代到 Cloudflare 上的源站域名（Worker）
+# - 后台只从源站域名访问，这里直接屏蔽
+# 端口按你的实际情况写：如果 443 被 sing-box 按 SNI 分流、Caddy 在 8443，就写 :8443
+
+chat.example.com:8443 {
+	@admin path /admin /admin.html /api/admin/*
+	respond @admin 404
+
+	handle /relay* {
+		reverse_proxy 127.0.0.1:8790
+	}
+
+	handle {
+		reverse_proxy https://o.example.com {
+			header_up Host o.example.com
+			header_up X-Yacr-Proxy {$YACR_PROXY_SECRET}
+			header_up X-Yacr-Client-IP {remote_host}
+			transport http {
+				tls_server_name o.example.com
+			}
+		}
+	}
+}

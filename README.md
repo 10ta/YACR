@@ -1,6 +1,11 @@
 # YACR
 
-Yet another chat room：打开即用的临时聊天室。房间号给你生成好，进去后把链接发给朋友；每人随机分到一个动物名，头像是一个随机 emoji 配纯色圆底。文字、图片、音频、视频都在浏览器之间 P2P 直连传输，服务器只负责"牵线"（信令），看不到内容；不保存任何历史，房间结束即清空。
+Yet another chat room：打开即用的临时聊天室。房间号给你生成好，进去后把链接发给朋友；每人随机分到一个动物名，头像是一个随机 emoji 配纯色圆底。不保存任何历史，房间结束即清空。
+
+聊天内容有两种传输方式，由管理员在后台选择，每个房间在创建时固定：
+
+- **WebSocket 中转**（默认）：所有消息和文件经你自己 VPS 上的中转服务转发，走 TCP 443，网页能打开就能聊天，不需要浏览器支持 WebRTC。中转服务只转发、不存储，但技术上能看到内容。
+- **P2P 直连**：浏览器之间 WebRTC 直连，服务器只负责"牵线"（信令），看不到内容；连不上时走 TURN，或由其他成员转发。
 
 ## 功能
 
@@ -14,12 +19,13 @@ Yet another chat room：打开即用的临时聊天室。房间号给你生成�
 - 部分连通时自动转发：A 和 C 没能直连、但都连着 B 时，B 会把两人的文字消息和媒体公告转给对方（各自广播"我直连着谁"，只转给需要的人，最多转 3 跳）。媒体文件本身仍需从有这个文件的直连成员那里取
 - 浏览器禁用了 WebRTC 时直接提示，不会进入一个发不了消息的房间
 - 标签页标题显示未读数，可选开启系统通知；手机切回前台或网络恢复时立即重连
-- 直连失败时自动走 Cloudflare TURN 中继（需配置）
+- 直连失败时自动走 Cloudflare TURN 中继（需配置，仅 P2P 模式）
 
 **管理员**（`/admin`）
 
 - 站点总开关：关闭时访客只看到"网站维护中"，并结束所有房间
 - 访客新建开关（默认关闭）：关闭时只有管理员能新建房间，访客只能凭房间号加入
+- 新房间的传输方式：WebSocket 中转（默认）或 P2P 直连，并显示中转服务是否正常；房间列表里标出每个房间用的方式
 - 右上角"新建房间"：直接建房并在新标签页打开，不受上面两个开关限制
 - 查看活跃房间（成员、IP、锁定状态、最后消息时间），进入任意房间（包括已锁定、已满的），结束单个或全部房间
 - 封禁：按浏览器标识，或按 IP；封禁名单可解除
@@ -60,6 +66,25 @@ Yet another chat room：打开即用的临时聊天室。房间号给你生成�
    - 确认自定义域名可用后，在 `wrangler.jsonc` 加上 `"workers_dev": false` 和 `"preview_urls": false`，关闭可以绕过 Access 的默认地址。
 
 之后每次推送到 `main` 都会自动重新部署，Secret 会一直保留。
+
+## WebSocket 中转服务（relay/）
+
+一个很小的 Node.js 程序（依赖只有 `ws`），部署在 VPS 上，由 Caddy 把访客域名下的 `/relay` 转给它。它只认 Worker 签发的票据（房间号 + 成员 + 过期时间，用 `RELAY_SECRET` 签名），只在同一房间的成员之间转发，不存储任何内容；房间结束、成员被封禁时，Worker 会通知它断开对应连接。
+
+安装（在 VPS 上、仓库目录里执行，需 root）：
+
+```bash
+sudo DOMAIN=chat.example.com ORIGIN_HOST=o.example.com bash relay/setup.sh
+```
+
+脚本会：安装 Node.js（如缺）、把服务装到 `/opt/yacr-relay`、生成 `/etc/yacr-relay.env`（含 `RELAY_SECRET`，只生成一次）、安装并启动 systemd 服务 `yacr-relay`，最后打印填好的 Caddy 配置和需要添加到 Worker 的两个 Secret：
+
+- `RELAY_URL` = `wss://chat.example.com/relay`
+- `RELAY_SECRET` = 脚本打印的值
+
+脚本不会改动 Caddy 和 Cloudflare，这两步按提示手动完成。示例见 `relay/Caddyfile.example`，服务模板见 `relay/yacr-relay.service`。更新时 `git pull` 后重新运行脚本即可，密钥保持不变。日志：`journalctl -u yacr-relay -f`。
+
+没有配置这两个 Secret 时，即使后台选了 WebSocket 中转，新房间也会自动改用 P2P 直连。
 
 ## 经 VPS 反向代理（改善中国大陆访问）
 

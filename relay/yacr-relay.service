@@ -1,0 +1,30 @@
+# YACR WebSocket 中转服务（由 setup.sh 安装到 /etc/systemd/system/）
+[Unit]
+Description=YACR WebSocket relay
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/yacr-relay.env
+WorkingDirectory=@INSTALL_DIR@
+ExecStart=@NODE@ @INSTALL_DIR@/server.js
+Restart=always
+RestartSec=3
+
+# 以临时的无特权用户运行，并尽量收紧权限
+DynamicUser=yes
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+LockPersonality=yes
+MemoryMax=512M
+
+[Install]
+WantedBy=multi-user.target

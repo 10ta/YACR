@@ -1,0 +1,9 @@
+{
+  "name": "yacr-relay",
+  "private": true,
+  "type": "module",
+  "description": "YACR WebSocket 中转服务：只在房间成员之间转发消息，不存储任何内容",
+  "scripts": { "start": "node server.js" },
+  "dependencies": { "ws": "8.22.0" },
+  "engines": { "node": ">=18" }
+}

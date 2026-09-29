@@ -1,5 +1,6 @@
 import { Conn, joinRoom } from './relay.js';
 import { identityFor, loadSelf } from './identity.js';
+import { relayRoom } from './wsroom.js';
 
 const APP_ID = 'roomchat';
 const ALPHA = '0123456789abcdefghjkmnpqrstvwxyz';
@@ -112,6 +113,8 @@ const post = (path, data) =>
 // ---------- 启动 ----------
 let isAdmin = false;
 let canCreate = false; // 访客能否新建房间（管理员总是可以）
+let transport = 'p2p'; // 当前房间的中转方式：'ws'（经 VPS 中转）或 'p2p'（浏览器直连）
+const hasWebRTC = typeof RTCPeerConnection !== 'undefined';
 
 async function boot() {
   const st = await api('/api/status');
@@ -119,10 +122,13 @@ async function boot() {
   isAdmin = Boolean(st.body.admin);
   canCreate = isAdmin || Boolean(st.body.create);
   if (!st.body.open && !isAdmin) return showClosed();
-  if (typeof RTCPeerConnection === 'undefined') return showNoWebRTC();
 
   const raw = decodeURIComponent(location.pathname.slice(1));
-  if (!raw) return showHome();
+  if (!raw) {
+    // 新房间的中转方式由后台决定；只有 P2P 模式需要浏览器支持 WebRTC
+    if (st.body.transport !== 'ws' && !hasWebRTC) return showNoWebRTC();
+    return showHome();
+  }
 
   const id = normalizeId(raw);
   if (!ID_RE.test(id)) return showScreen('房间不存在', '检查一下链接是否完整，或者回到首页新建一个房间。', { home: true });
@@ -133,6 +139,7 @@ async function boot() {
   if (!r.ok) return showScreen('无法连接', '服务器暂时连不上，请稍后刷新重试。');
   const s = r.body;
   if (!s.exists) return showScreen('房间不存在', '检查一下链接是否完整，或者回到首页新建一个房间。', { home: true });
+  if (s.transport !== 'ws' && !hasWebRTC) return showNoWebRTC();
   if (s.state === 'ended') return showScreen('房间已结束', endedText(s.reason, ''), { home: true });
   // 管理员可以进入锁定或已满的房间（服务端同样放行）
   const returning = Boolean(getToken(id)) || isAdmin;
@@ -213,7 +220,18 @@ async function onControl(m) {
       setLocked(m.locked);
       if (m.maxFileMB) maxFileBytes = m.maxFileMB * 1024 * 1024;
       if (m.idleMs) $('#hint').textContent = `${Math.round(m.idleMs / 60000)} 分钟没有新消息，房间会自动结束。`;
-      if (!room) {
+      transport = m.transport === 'ws' ? 'ws' : 'p2p';
+      if (room) {
+        if (transport === 'ws' && m.relay) room.updateTicket?.(m.relay.ticket);
+        return;
+      }
+      if (transport === 'ws') {
+        if (!m.relay) return banner('中转服务没有配置好，暂时无法聊天。请联系管理员。', 'relay');
+        room = relayRoom(m.relay.url, m.relay.ticket, { onStatus: relayStatus });
+        wireRoom();
+        return;
+      }
+      {
         const ice = await loadIce(m.token);
         if (ended || room) return;
         try {
@@ -262,6 +280,12 @@ async function loadIce(token) {
   return DEFAULT_ICE;
 }
 
+function relayStatus(s) {
+  if (ended) return;
+  if (s === 'down') banner('与中转服务器的连接断了，正在重连。', 'relay');
+  if (s === 'up' && $('#banner').dataset.kind === 'relay') banner('');
+}
+
 // ---------- P2P ----------
 function startP2P(iceServers) {
   // trickleIce: false —— 绕过 Trystero 0.25.x 的 offer 过期问题（约 57 秒后新人连不上）
@@ -270,6 +294,11 @@ function startP2P(iceServers) {
     roomId,
     { onJoinError: (e) => console.warn('[p2p]', e.error) },
   );
+  wireRoom();
+}
+
+// 两种模式共用：在 room（Trystero 房间或中转房间）上挂好所有消息通道
+function wireRoom() {
   const hello = room.makeAction('hello');
   const chat = room.makeAction('chat');
   const sync = room.makeAction('sync', { kind: 'request', onRequest: () => messages.slice(-SYNC_LIMIT) });
@@ -774,9 +803,11 @@ function watchStuck(pending) {
     stuckTimer = 0;
     if (ended || !$('.members .pending')) return;
     banner(
-      peers.size
+      peers.size && transport !== 'ws'
         ? '有人没能和你直连。你们之间的文字消息会经由其他成员转发，但图片和视频可能取不到。'
-        : '有人在房间里，但一直没能和你直连上，所以互相收不到消息。常见原因：某一方的浏览器扩展或隐私设置限制了 WebRTC，或者网络不允许直连。',
+        : transport === 'ws'
+          ? '有人在房间里，但还没连上中转服务器，暂时互相收不到消息。'
+          : '有人在房间里，但一直没能和你直连上，所以互相收不到消息。常见原因：某一方的浏览器扩展或隐私设置限制了 WebRTC，或者网络不允许直连。',
       'stuck',
     );
   }, 20000);
@@ -918,6 +949,7 @@ function bind() {
     unread = 0;
     updateTitle();
     conn?.reconnectNow();
+    room?.reconnectNow?.();
   };
   document.addEventListener('visibilitychange', wake);
   window.addEventListener('online', wake);

@@ -65,6 +65,46 @@ const clientIp = (req, env) => {
   return `proxy:${edge}`; // 反代没拿到真实 IP（例如前面还有一层本机转发）
 };
 
+// ---------- WebSocket 中转服务（部署在 VPS 上，见 relay/） ----------
+// RELAY_URL：中转服务的 WebSocket 地址，如 wss://chat.example.com/relay
+// RELAY_SECRET：与中转服务共享的密钥，用来签发连接票据、调用它的控制接口
+const relayReady = (env) => Boolean(env.RELAY_URL && env.RELAY_SECRET);
+const relayHttp = (env) => String(env.RELAY_URL || '').replace(/^ws/, 'http').replace(/\/+$/, '');
+const RELAY_TICKET_HOURS = 24;
+const b64urlBytes = (bytes) => btoa(String.fromCharCode(...bytes)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+async function relaySign(secret, msg) {
+  const key = await crypto.subtle.importKey('raw', new TextEncoder().encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+  return b64urlBytes(new Uint8Array(await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(msg))));
+}
+async function relayTicket(env, room, uid) {
+  const body = b64urlBytes(new TextEncoder().encode(JSON.stringify({ r: room, u: uid, e: Date.now() + RELAY_TICKET_HOURS * 3600e3 })));
+  return `${body}.${await relaySign(env.RELAY_SECRET, body)}`;
+}
+// 通知中转服务（结束房间、移出成员）；失败不影响主流程
+async function relayNotify(env, data) {
+  if (!relayReady(env)) return;
+  try {
+    await fetch(`${relayHttp(env)}/control`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-relay-secret': env.RELAY_SECRET },
+      body: JSON.stringify(data),
+      signal: AbortSignal.timeout(5000),
+    });
+  } catch (err) {
+    console.error('relay notify failed', String(err));
+  }
+}
+async function relayHealth(env) {
+  try {
+    const r = await fetch(`${relayHttp(env)}/health`, { signal: AbortSignal.timeout(4000) });
+    return r.ok ? 'ok' : `HTTP ${r.status}`;
+  } catch (err) {
+    return String(err).slice(0, 120);
+  }
+}
+// 新房间实际使用的中转方式：后台选了 WebSocket 但中转服务没配置时，退回 P2P
+const effectiveTransport = (env, chosen) => (chosen === 'ws' && relayReady(env) ? 'ws' : 'p2p');
+
 // ---------- 管理员鉴权 ----------
 // cookie 里不存令牌原文，只存"过期时间.签名"，签名 = HMAC-SHA256(ADMIN_TOKEN, 过期时间)。
 // 服务端无需存储会话；更换 ADMIN_TOKEN 后所有旧会话立即失效。
@@ -173,7 +213,10 @@ export default {
     const ip = clientIp(req, env);
 
     try {
-      if (path === '/api/status') return json({ ...(await siteState(env)), admin });
+      if (path === '/api/status') {
+        const st = await siteState(env);
+        return json({ open: st.open, create: st.create, transport: effectiveTransport(env, st.transport), admin });
+      }
 
       // ----- 管理员 -----
       if (path === '/api/admin/login' && req.method === 'POST') {
@@ -282,6 +325,7 @@ async function adminApi(req, env, path) {
       settings: effectiveSettings(env, await reg.getSettings()),
       settingsSpec: SETTINGS,
       turn: Boolean(env.TURN_KEY_ID && env.TURN_KEY_API_TOKEN),
+      relay: relayReady(env) ? { url: env.RELAY_URL, health: await relayHealth(env) } : null,
     });
   }
 
@@ -291,6 +335,12 @@ async function adminApi(req, env, path) {
     // 关站时结束所有房间
     if (!v) await Promise.all((await reg.list()).map((id) => roomStub(env, id).end('closed')));
     return json({ open: v });
+  }
+
+  if (path === '/api/admin/transport' && req.method === 'POST') {
+    await reg.setTransport(body.transport === 'p2p' ? 'p2p' : 'ws');
+    siteCache = { v: await reg.getSite(), t: Date.now() };
+    return json(siteCache.v);
   }
 
   if (path === '/api/admin/create' && req.method === 'POST') {
@@ -315,7 +365,9 @@ async function adminApi(req, env, path) {
     if (!uid && !ip) return json({ error: 'bad_request' }, 400);
     await reg.ban({ uid, ip, name: clip(body.name, 24) });
     const ids = await reg.list();
-    await Promise.all(ids.map((id) => roomStub(env, id).kick({ uid, ip })));
+    const hits = (await Promise.all(ids.map((id) => roomStub(env, id).kick({ uid, ip })))).flat();
+    const uids = [...new Set([uid, ...hits].filter(Boolean))];
+    if (uids.length) await relayNotify(env, { action: 'kick', uids });
     return json({ ok: true });
   }
 
@@ -361,7 +413,12 @@ export class Room extends DurableObject {
   // 房间创建时把当时的后台设置固定下来，之后改设置只影响新房间
   cfg(meta) {
     const s = meta?.settings || {};
-    return { idleMs: num(s.idleMinutes, 30) * 60e3, maxMembers: num(s.maxMembers, 10), maxFileMB: num(s.maxFileMB, 100) };
+    return {
+      idleMs: num(s.idleMinutes, 30) * 60e3,
+      maxMembers: num(s.maxMembers, 10),
+      maxFileMB: num(s.maxFileMB, 100),
+      transport: s.transport === 'ws' ? 'ws' : 'p2p', // 旧房间没有这个字段，按 P2P 处理
+    };
   }
 
   async init(id, settings) {
@@ -392,6 +449,7 @@ export class Room extends DurableObject {
       reason: meta.reason || null,
       locked: meta.locked,
       full: count >= this.cfg(meta).maxMembers,
+      transport: this.cfg(meta).transport,
     };
   }
 
@@ -472,9 +530,15 @@ export class Room extends DurableObject {
     await this.putMeta(meta);
     await this.schedule(meta);
 
+    const relay =
+      cfg.transport === 'ws' && relayReady(this.env)
+        ? { url: this.env.RELAY_URL, ticket: await relayTicket(this.env, meta.id, clip(url.searchParams.get('uid'), 32)) }
+        : null;
     server.send(
       JSON.stringify({
         type: 'welcome',
+        transport: cfg.transport,
+        relay,
         token,
         locked: meta.locked,
         idleMs: cfg.idleMs,
@@ -583,7 +647,7 @@ export class Room extends DurableObject {
         } catch { }
       }
     }
-    if (!hit.length) return 0;
+    if (!hit.length) return [];
     const out = JSON.stringify({ type: 'kicked', uids: hit.map((a) => a.uid) });
     for (const s of this.members()) {
       const a = s.deserializeAttachment();
@@ -594,7 +658,7 @@ export class Room extends DurableObject {
       }
     }
     this.presence(hit.length === 1 ? hit[0].cid : undefined);
-    return hit.length;
+    return hit.map((a) => a.uid);
   }
 
   broadcast(obj) {
@@ -653,6 +717,7 @@ export class Room extends DurableObject {
       } catch { }
     }
     await registry(this.env).remove(meta.id);
+    if (this.cfg(meta).transport === 'ws') this.ctx.waitUntil(relayNotify(this.env, { action: 'end', room: meta.id }));
     await this.schedule(meta);
     return true;
   }
@@ -671,8 +736,11 @@ export class Registry extends DurableObject {
     return (await this.ctx.storage.get('open')) === true;
   }
   async getSite() {
-    const m = await this.ctx.storage.get(['open', 'create']);
-    return { open: m.get('open') === true, create: m.get('create') === true };
+    const m = await this.ctx.storage.get(['open', 'create', 'transport']);
+    return { open: m.get('open') === true, create: m.get('create') === true, transport: m.get('transport') || 'ws' };
+  }
+  async setTransport(v) {
+    await this.ctx.storage.put('transport', v);
   }
   async setCreate(v) {
     await this.ctx.storage.put('create', Boolean(v));
@@ -691,7 +759,8 @@ export class Registry extends DurableObject {
 
   // 建房前的检查：封禁 + 限流，并返回当前生效的设置
   async createGate(ip, uid, admin) {
-    const settings = effectiveSettings(this.env, await this.getSettings());
+    const site = await this.getSite();
+    const settings = { ...effectiveSettings(this.env, await this.getSettings()), transport: effectiveTransport(this.env, site.transport) };
     if (admin) return { ok: true, settings };
     if (await this.isBanned(uid, ip)) return { ok: false, reason: 'banned' };
     const now = Date.now();

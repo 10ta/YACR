@@ -45,6 +45,14 @@
           </div>
           <button class="btn ghost" id="create-toggle" type="button"></button>
         </div>
+        <div class="site-state" id="transport">
+          <span class="lamp" aria-hidden="true"></span>
+          <div class="grow">
+            <strong id="transport-title"></strong>
+            <p id="transport-text"></p>
+          </div>
+          <button class="btn ghost" id="transport-toggle" type="button"></button>
+        </div>
 
         <section>
           <div class="admin-head">
@@ -143,6 +151,21 @@
           : '访客只能用房间号加入已有的房间。你在首页照常可以新建，建好后把链接发给朋友。';
         $('#create-toggle').textContent = create ? '禁止访客新建' : '允许访客新建';
 
+        // 新房间的中转方式（在建房时固定，切换只影响之后新建的房间）
+        const ws = state.transport !== 'p2p';
+        const relay = state.relay;
+        const relayOk = relay && relay.health === 'ok';
+        $('#transport').classList.toggle('open', ws ? relayOk : true);
+        $('#transport-title').textContent = ws ? '新房间：WebSocket 中转' : '新房间：P2P 直连';
+        $('#transport-text').textContent = ws
+          ? !relay
+            ? '中转服务未配置（缺少 RELAY_URL / RELAY_SECRET），新房间会自动改用 P2P 直连。'
+            : relayOk
+              ? `所有消息和文件经 VPS 中转（${relay.url}），服务正常。已有房间不受切换影响。`
+              : `中转服务连不上（${relay.health}），新房间里的人会暂时无法聊天。`
+          : '浏览器之间直连，连不上时走 TURN 或由其他成员转发。已有房间不受切换影响。';
+        $('#transport-toggle').textContent = ws ? '改为 P2P 直连' : '改为 WebSocket 中转';
+
         // 房间
         const tbody = $('#rooms');
         tbody.replaceChildren();
@@ -181,7 +204,11 @@
             list.append(line);
           }
           who.append(list);
-          const st = el('td', '', room.locked ? '禁止新人' : '开放');
+          const st = el('td');
+          st.append(
+            el('div', '', room.locked ? '禁止新人' : '开放'),
+            el('div', 'who', room.settings?.transport === 'ws' ? 'WebSocket 中转' : 'P2P 直连'),
+          );
           const last = el('td', '', ago(room.lastActivity));
           const act = el('td', 'actions');
           const enter = el('a', 'btn small ghost', '进入');
@@ -288,6 +315,10 @@
       $('#site-toggle').onclick = async () => {
         if (state.open && !confirm('关闭站点会立即结束所有房间，确定吗？')) return;
         await post('/api/admin/open', { open: !state.open });
+        load();
+      };
+      $('#transport-toggle').onclick = async () => {
+        await post('/api/admin/transport', { transport: state.transport === 'p2p' ? 'ws' : 'p2p' });
         load();
       };
       $('#create-toggle').onclick = async () => {
