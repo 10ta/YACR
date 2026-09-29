@@ -1,6 +1,6 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "roomchat",
+  "name": "yacr",
   "main": "src/worker.js",
   "compatibility_date": "2026-08-01",
   "build": { "command": "npm run build" },
