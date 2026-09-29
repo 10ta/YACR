@@ -149,7 +149,7 @@ body[data-view='loading'] .screen-dots i:nth-child(3) { animation-delay: 0.3s; }
 
 .msg { display: flex; gap: 10px; margin-top: 14px; align-items: flex-start; }
 .msg .body { max-width: min(78%, 34em); display: flex; flex-direction: column; align-items: flex-start; }
-.msg .meta { display: flex; gap: 8px; align-items: baseline; font-size: 12px; color: var(--muted); margin-bottom: 3px; }
+.msg .name { font-size: 12px; margin-bottom: 3px; }
 /* 名字颜色向正文色靠一点，浅色头像的名字在浅背景上也看得清 */
 .msg .name { color: color-mix(in oklch, var(--who) 72%, var(--ink)); font-weight: 600; }
 .msg .text {
@@ -163,11 +163,10 @@ body[data-view='loading'] .screen-dots i:nth-child(3) { animation-delay: 0.3s; }
 }
 .msg.cont { margin-top: 4px; }
 .msg.cont .dot { visibility: hidden; height: 0; }
-.msg.cont .meta { display: none; }
+.msg.cont .name { display: none; }
 
 .msg.mine { flex-direction: row-reverse; }
 .msg.mine .body { align-items: flex-end; }
-.msg.mine .meta { flex-direction: row-reverse; }
 .msg.mine .text { background: var(--who); border-color: var(--who); color: var(--who-ink, #fff); border-radius: 14px 4px 14px 14px; }
 
 .composer { display: flex; gap: 10px; align-items: flex-end; padding: 12px 20px 4px; border-top: 1px solid var(--line); }
@@ -263,13 +262,17 @@ body.join-only #home-shuffle { display: none; }
 
 /* ---------- 消息附加 ---------- */
 .msg .text a { color: inherit; text-decoration: underline; text-underline-offset: 2px; }
-.msg .copy {
-  appearance: none; border: 0; background: none; padding: 0; font: inherit; font-size: 12px;
-  color: var(--muted); cursor: pointer; opacity: 0;
+/* 气泡内右下角的时间：浮在最后一行右侧，放不下时自动换到下一行 */
+.msg .text .stamp {
+  float: right;
+  margin: 0.55em 0 -0.3em 0.9em;
+  font-size: 11px;
+  line-height: 1;
+  opacity: 0.6;
+  font-variant-numeric: tabular-nums;
+  user-select: none;
 }
-.msg:hover .copy, .msg .copy:focus-visible { opacity: 1; }
-@media (hover: none) { .msg .copy { opacity: 0.7; } }
-.msg.cont:hover .meta { display: flex; }
+.media-info .stamp { flex: none; font-variant-numeric: tabular-nums; }
 
 /* ---------- 媒体 ---------- */
 .media {

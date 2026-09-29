@@ -574,16 +574,18 @@ function renderMessage(msg, prev, next) {
   row.style.setProperty('--who-ink', who.ink);
   row.append(avatar(who));
   const body = el('div', 'body');
-  const meta = el('div', 'meta');
-  meta.append(el('span', 'name', mine ? '我' : who.name), el('time', 'time', timeFmt.format(msg.ts)));
+  // 别人的消息：一组消息的第一条上方显示名字；时间放在气泡内右下角（类似 Telegram）
+  if (!mine) body.append(el('div', 'name', who.name));
+  const stamp = el('time', 'stamp', timeFmt.format(msg.ts));
+  stamp.dateTime = new Date(msg.ts).toISOString();
   if (msg.type === 'text') {
-    const copy = el('button', 'copy', '复制');
-    copy.type = 'button';
-    copy.onclick = () => copyText(msg.text, copy);
-    meta.append(copy);
-    body.append(meta, linkify(msg.text));
+    const text = linkify(msg.text);
+    text.append(stamp);
+    body.append(text);
   } else {
-    body.append(meta, mediaCard(msg));
+    const card = mediaCard(msg);
+    card.dataset.stamp = stamp.textContent;
+    body.append(card);
   }
   row.append(body);
   nodes.set(msg.id, row);
@@ -596,19 +598,10 @@ function renderMessage(msg, prev, next) {
   if (stick || mine) log.scrollTop = log.scrollHeight;
 }
 
-async function copyText(text, btn) {
-  try {
-    await navigator.clipboard.writeText(text);
-    btn.textContent = '已复制';
-  } catch {
-    btn.textContent = '复制失败';
-  }
-  setTimeout(() => (btn.textContent = '复制'), 1500);
-}
-
 function mediaCard(msg) {
   const card = el('div', `media ${msg.kind}`);
   card.dataset.id = msg.id;
+  card.dataset.stamp = timeFmt.format(msg.ts);
   if (msg.kind !== 'audio' && msg.w && msg.h) card.style.aspectRatio = `${msg.w} / ${msg.h}`;
   fillMedia(card, msg);
   return card;
@@ -677,6 +670,7 @@ function fillMedia(card, msg, error = '') {
       if (error) info.append(el('span', 'media-state err', error));
     }
   }
+  if (card.dataset.stamp) info.append(el('time', 'stamp', card.dataset.stamp));
   card.replaceChildren(...parts, info);
 }
 
