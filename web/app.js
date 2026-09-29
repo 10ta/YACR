@@ -109,11 +109,13 @@ const post = (path, data) =>
 
 // ---------- 启动 ----------
 let isAdmin = false;
+let canCreate = false; // 访客能否新建房间（管理员总是可以）
 
 async function boot() {
   const st = await api('/api/status');
   if (!st.ok) return showScreen('无法连接', '服务器暂时连不上，请稍后刷新重试。');
   isAdmin = Boolean(st.body.admin);
+  canCreate = isAdmin || Boolean(st.body.create);
   if (!st.body.open && !isAdmin) return showClosed();
   if (typeof RTCPeerConnection === 'undefined') return showNoWebRTC();
 
@@ -140,9 +142,17 @@ async function boot() {
 // ---------- 首页：预先生成一个房间号 ----------
 function showHome() {
   document.body.dataset.view = 'home';
-  document.title = '开一个临时聊天室';
   const input = $('#home-id');
-  input.value = randomId();
+  // 不允许新建时：只能填朋友给的房间号加入
+  document.body.classList.toggle('join-only', !canCreate);
+  document.title = canCreate ? '开一个临时聊天室' : '加入聊天室';
+  $('#home-title').textContent = canCreate ? '开一个临时聊天室' : '加入聊天室';
+  $('#home-lead').textContent = canCreate
+    ? '房间号已经生成好了，进去后把链接发给朋友。也可以换一个，或者填上朋友给你的房间号。'
+    : '现在暂不开放新建房间。填上朋友给你的 6 位房间号，就能加入。';
+  $('#home-go').textContent = canCreate ? '进入房间' : '加入房间';
+  input.value = canCreate ? randomId() : '';
+  input.placeholder = canCreate ? '' : '房间号';
   $('#home-me').replaceChildren(avatar(me, 'lg'), el('span', '', `你会以「${me.name}」的身份进入`));
   input.focus();
   input.select();
@@ -163,7 +173,8 @@ async function homeGo() {
   if (e === 'banned') return showBanned();
   err.textContent =
     {
-      ended: '这个房间号刚用过，房间已经结束了，换一个吧。',
+      ended: canCreate ? '这个房间号刚用过，房间已经结束了，换一个吧。' : '这个房间已经结束了。',
+      no_create: '没有找到这个房间。现在只能加入已有的房间，检查一下房间号是否正确。',
       taken: '这个房间号刚被人占用了，换一个吧。',
       rate_limited: '新建房间太频繁了，请过几分钟再试。',
       bad_id: '房间号是 6 位字母或数字。',

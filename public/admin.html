@@ -35,6 +35,14 @@
           </div>
           <button class="btn" id="site-toggle" type="button"></button>
         </div>
+        <div class="site-state" id="create">
+          <span class="lamp" aria-hidden="true"></span>
+          <div class="grow">
+            <strong id="create-title"></strong>
+            <p id="create-text"></p>
+          </div>
+          <button class="btn ghost" id="create-toggle" type="button"></button>
+        </div>
 
         <section>
           <div class="admin-head">
@@ -119,9 +127,19 @@
         $('#site').classList.toggle('open', open);
         $('#site-title').textContent = open ? '站点开放中' : '站点已关闭';
         $('#site-text').textContent = open
-          ? '任何拿到链接的人都能创建或加入房间。'
+          ? state.create
+            ? '任何人都能新建房间，拿到链接的人都能加入。'
+            : '拿到房间号或链接的人可以加入已有房间。'
           : '访客只会看到"网站维护中"，你本人不受影响。';
         $('#site-toggle').textContent = open ? '关闭站点' : '开放站点';
+
+        const create = state.create;
+        $('#create').classList.toggle('open', create);
+        $('#create-title').textContent = create ? '访客可以新建房间' : '只有你能新建房间';
+        $('#create-text').textContent = create
+          ? '任何打开首页的人都能新建房间。'
+          : '访客只能用房间号加入已有的房间。你在首页照常可以新建，建好后把链接发给朋友。';
+        $('#create-toggle').textContent = create ? '禁止访客新建' : '允许访客新建';
 
         // 房间
         const tbody = $('#rooms');
@@ -253,6 +271,10 @@
       $('#site-toggle').onclick = async () => {
         if (state.open && !confirm('关闭站点会立即结束所有房间，确定吗？')) return;
         await post('/api/admin/open', { open: !state.open });
+        load();
+      };
+      $('#create-toggle').onclick = async () => {
+        await post('/api/admin/create', { allow: !state.create });
         load();
       };
       $('#end-all').onclick = async () => {

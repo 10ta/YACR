@@ -66,12 +66,12 @@ const isAdmin = (req, env) => {
 const registry = (env) => env.REGISTRY.get(env.REGISTRY.idFromName('global'));
 const roomStub = (env, id) => env.ROOM.get(env.ROOM.idFromName(id));
 
-// 站点开关缓存 10 秒，避免每个请求都访问 Registry
-let openCache = { v: false, t: 0 };
-const siteOpen = async (env) => {
-  if (Date.now() - openCache.t < 10e3) return openCache.v;
-  openCache = { v: await registry(env).getOpen(), t: Date.now() };
-  return openCache.v;
+// 站点开关（open：站点是否开放；create：访客能否新建房间）缓存 10 秒，避免每个请求都访问 Registry
+let siteCache = { v: { open: false, create: false }, t: 0 };
+const siteState = async (env) => {
+  if (Date.now() - siteCache.t < 10e3) return siteCache.v;
+  siteCache = { v: await registry(env).getSite(), t: Date.now() };
+  return siteCache.v;
 };
 
 // ---------- TURN：Cloudflare Realtime TURN 临时凭证 ----------
@@ -119,7 +119,7 @@ export default {
     const ip = req.headers.get('cf-connecting-ip') || 'unknown';
 
     try {
-      if (path === '/api/status') return json({ open: await siteOpen(env), admin });
+      if (path === '/api/status') return json({ ...(await siteState(env)), admin });
 
       // ----- 管理员 -----
       if (path === '/api/admin/login' && req.method === 'POST') {
@@ -142,7 +142,8 @@ export default {
       }
 
       // ----- 访客：站点关闭时一律拒绝（管理员除外） -----
-      if (!admin && !(await siteOpen(env))) return json({ error: 'closed' }, 503);
+      const site = await siteState(env);
+      if (!admin && !site.open) return json({ error: 'closed' }, 503);
 
       // 新建房间，或用首页填写的房间号进入
       if (path === '/api/rooms' && req.method === 'POST') {
@@ -156,6 +157,9 @@ export default {
           if (st.exists && st.state === 'open') return json({ id: wanted, existing: true });
           if (st.exists) return json({ error: 'ended' }, 410);
         }
+
+        // 访客新建房间的开关（默认关闭）：关闭时访客只能加入已有房间，管理员不受影响
+        if (!admin && !site.create) return json({ error: 'no_create' }, 403);
 
         const gate = await registry(env).createGate(ip, uid, admin);
         if (!gate.ok) return json({ error: gate.reason }, gate.reason === 'banned' ? 403 : 429);
@@ -219,7 +223,7 @@ async function adminApi(req, env, path) {
     const ids = await reg.list();
     const rooms = (await Promise.all(ids.map((id) => roomStub(env, id).info()))).filter(Boolean);
     return json({
-      open: await reg.getOpen(),
+      ...(await reg.getSite()),
       rooms,
       bans: await reg.listBans(),
       settings: effectiveSettings(env, await reg.getSettings()),
@@ -230,10 +234,16 @@ async function adminApi(req, env, path) {
 
   if (path === '/api/admin/open' && req.method === 'POST') {
     const v = await reg.setOpen(Boolean(body.open));
-    openCache = { v, t: Date.now() };
+    siteCache = { v: await reg.getSite(), t: Date.now() };
     // 关站时结束所有房间
     if (!v) await Promise.all((await reg.list()).map((id) => roomStub(env, id).end('closed')));
     return json({ open: v });
+  }
+
+  if (path === '/api/admin/create' && req.method === 'POST') {
+    await reg.setCreate(Boolean(body.allow));
+    siteCache = { v: await reg.getSite(), t: Date.now() };
+    return json(siteCache.v);
   }
 
   if (path === '/api/admin/settings' && req.method === 'POST') {
@@ -606,6 +616,13 @@ export class Registry extends DurableObject {
 
   async getOpen() {
     return (await this.ctx.storage.get('open')) === true;
+  }
+  async getSite() {
+    const m = await this.ctx.storage.get(['open', 'create']);
+    return { open: m.get('open') === true, create: m.get('create') === true };
+  }
+  async setCreate(v) {
+    await this.ctx.storage.put('create', Boolean(v));
   }
   async setOpen(v) {
     await this.ctx.storage.put('open', Boolean(v));
