@@ -37,6 +37,8 @@ let locked = false;
 let ended = false;
 let synced = false;
 let lastActivitySent = 0;
+let present = 1; // 信令服务器上的在线人数（含自己），用来发现"有人在但连不上"
+let stuckTimer = 0;
 const peers = new Map(); // Trystero peerId -> 身份
 const messages = []; // 按时间排序的聊天消息
 const nodes = new Map(); // 消息 id -> DOM 节点
@@ -82,6 +84,11 @@ function showScreen(title, text, { newRoom = false, rejoin = false } = {}) {
 }
 
 const showClosed = () => showScreen('网站维护中', '暂时无法创建或加入房间，请稍后再来。');
+const showNoWebRTC = () =>
+  showScreen(
+    '浏览器禁用了直连',
+    '聊天需要浏览器的 WebRTC 功能，但它当前不可用。请检查是否装了禁用 WebRTC 的扩展，或在隐私设置里关闭了它，改完后刷新页面。',
+  );
 
 async function api(path, opts) {
   try {
@@ -101,6 +108,7 @@ async function boot() {
   const st = await api('/api/status');
   if (!st.ok) return showScreen('无法连接', '服务器暂时连不上，请稍后刷新重试。');
   if (!st.body.open && !st.body.admin) return showClosed();
+  if (typeof RTCPeerConnection === 'undefined') return showNoWebRTC();
 
   const raw = decodeURIComponent(location.pathname.slice(1));
   if (!raw) {
@@ -133,7 +141,7 @@ function enter(id) {
   roomId = id;
   document.body.dataset.view = 'chat';
   document.title = `房间 ${id}`;
-  $('#room-code').textContent = `${id.slice(0, 3)} ${id.slice(3)}`;
+  $('#room-code').textContent = id;
   renderMembers();
   system(`你是「${me.name}」。把链接发给朋友，他们打开就能加入。`);
 
@@ -149,7 +157,13 @@ function enter(id) {
   });
   conn.addEventListener('up', () => banner(''));
 
-  startP2P();
+  try {
+    startP2P();
+  } catch (err) {
+    console.error('[p2p] init failed', err);
+    teardown();
+    return showNoWebRTC();
+  }
   $('#input').focus();
 }
 
@@ -159,6 +173,10 @@ function onControl(m) {
       setToken(roomId, m.token);
       setLocked(m.locked);
       if (m.idleMs) $('#hint').textContent = `${Math.round(m.idleMs / 60000)} 分钟没有新消息，房间会自动结束。`;
+      return;
+    case 'presence':
+      present = Math.max(1, Number(m.count) || 1);
+      renderMembers();
       return;
     case 'state':
       setLocked(m.locked);
@@ -227,6 +245,7 @@ function startP2P() {
 function teardown() {
   if (ended) return;
   ended = true;
+  clearTimeout(stuckTimer);
   try {
     room?.leave();
   } catch {}
@@ -259,7 +278,8 @@ function receive(m) {
 function send() {
   const input = $('#input');
   const text = input.value.replace(/\s+$/, '');
-  if (!text.trim() || ended || !act) return;
+  if (!text.trim() || ended) return;
+  if (!act) return banner('直连功能没有启动成功，消息发不出去。请刷新页面重试。');
   const m = { id: crypto.randomUUID(), uid: me.uid, ts: Date.now(), text: text.slice(0, MAX_LEN) };
   receive(m);
   act.chat.send(m);
@@ -317,8 +337,34 @@ function renderMembers() {
       if (i === 0) d.classList.add('self');
       return d;
     }),
-    el('span', 'count', `${list.length} 人在房间里`),
+    el('span', 'count', countText(1 + peers.size)),
   );
+  watchStuck(1 + peers.size);
+}
+
+function countText(connected) {
+  const pending = present - connected;
+  if (pending <= 0) return `${connected} 人在房间里`;
+  return `${present} 人在房间里，其中 ${pending} 人正在连接`;
+}
+
+// 信令显示有人、但 20 秒内 P2P 仍没连上：多半是浏览器或网络限制了 WebRTC
+function watchStuck(connected) {
+  if (present <= connected) {
+    clearTimeout(stuckTimer);
+    stuckTimer = 0;
+    if ($('#banner').dataset.kind === 'stuck') banner('');
+    return;
+  }
+  if (stuckTimer) return;
+  stuckTimer = setTimeout(() => {
+    stuckTimer = 0;
+    if (ended || present <= 1 + peers.size) return;
+    banner(
+      '有人在房间里，但一直没能和你直连上，所以互相收不到消息。常见原因：某一方的浏览器扩展或隐私设置限制了 WebRTC，或者网络不允许直连。',
+      'stuck',
+    );
+  }, 20000);
 }
 
 function setLocked(v) {
@@ -329,9 +375,10 @@ function setLocked(v) {
   $('#lock-chip').hidden = !locked;
 }
 
-function banner(text) {
+function banner(text, kind = '') {
   const b = $('#banner');
   b.textContent = text;
+  b.dataset.kind = text ? kind : '';
   b.hidden = !text;
 }
 

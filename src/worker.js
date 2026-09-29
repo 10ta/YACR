@@ -278,6 +278,7 @@ export class Room extends DurableObject {
         lastActivity: meta.lastActivity,
       }),
     );
+    this.broadcast({ type: 'presence', count: this.members().length });
     return new Response(null, { status: 101, webSocket: client });
   }
 
@@ -358,6 +359,12 @@ export class Room extends DurableObject {
     if (!meta || meta.state !== 'open') return;
     const leaving = ws.deserializeAttachment()?.cid;
     const left = this.members().filter((s) => s.deserializeAttachment()?.cid !== leaving);
+    const out = JSON.stringify({ type: 'presence', count: left.length });
+    for (const s of left) {
+      try {
+        s.send(out);
+      } catch { }
+    }
     if (left.length === 0 && !meta.emptySince) {
       meta.emptySince = Date.now();
       await this.putMeta(meta);
