@@ -1,0 +1,47 @@
+From dc8faaa3b432aa29386818dd0c5eff07a15cfe9d Mon Sep 17 00:00:00 2001
+From: x <x@x>
+Date: Tue, 29 Sep 2026 13:14:52 +0000
+Subject: [PATCH] feat: new-room button in admin header
+
+---
+ public/admin.html | 17 +++++++++++++++++
+ 1 file changed, 17 insertions(+)
+
+diff --git a/public/admin.html b/public/admin.html
+index d9e0b60..3c3e0c1 100644
+--- a/public/admin.html
++++ b/public/admin.html
+@@ -12,6 +12,8 @@
+       <div class="admin-head">
+         <h1>管理后台</h1>
+         <div class="admin-row" id="session" hidden>
++          <span class="err" id="new-room-err"></span>
++          <button class="btn small" id="new-room" type="button">新建房间</button>
+           <button class="btn small ghost" id="refresh" type="button">刷新</button>
+           <button class="btn small ghost" id="logout" type="button">退出登录</button>
+         </div>
+@@ -268,6 +270,21 @@
+         load();
+       };
+       $('#refresh').onclick = load;
++      // 新建房间并在新标签页打开。先同步打开空白页，避免异步之后被浏览器当成弹窗拦截
++      $('#new-room').onclick = async () => {
++        $('#new-room-err').textContent = '';
++        const tab = window.open('about:blank', '_blank');
++        const r = await post('/api/rooms', {});
++        const data = await r.json().catch(() => ({}));
++        if (!r.ok || !data.id) {
++          tab?.close();
++          $('#new-room-err').textContent = '新建失败，请重试。';
++          return;
++        }
++        if (tab) tab.location.href = `/${data.id}`;
++        else location.href = `/${data.id}`;
++        load();
++      };
+       $('#site-toggle').onclick = async () => {
+         if (state.open && !confirm('关闭站点会立即结束所有房间，确定吗？')) return;
+         await post('/api/admin/open', { open: !state.open });
+-- 
+2.43.0
+
