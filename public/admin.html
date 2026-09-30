@@ -37,6 +37,16 @@
           </div>
           <button class="btn" id="site-toggle" type="button"></button>
         </div>
+        <div class="site-state" id="autoclose">
+          <span class="lamp" aria-hidden="true"></span>
+          <div class="grow">
+            <strong>无人使用
+              <input type="number" id="autoclose-min" min="1" max="1440" placeholder="—" aria-label="分钟数" />
+              分钟后自动关站</strong>
+            <p id="autoclose-text"></p>
+          </div>
+          <button class="btn ghost" id="autoclose-save" type="button">保存</button>
+        </div>
         <div class="site-state" id="create">
           <span class="lamp" aria-hidden="true"></span>
           <div class="grow">
@@ -142,6 +152,23 @@
             : '拿到房间号或链接的人可以加入已有房间。'
           : '访客只会看到"网站维护中"，你本人不受影响。';
         $('#site-toggle').textContent = open ? '关闭站点' : '开放站点';
+
+        // 无人使用自动关站
+        const ac = state.autoClose || {};
+        const acInput = $('#autoclose-min');
+        if (document.activeElement !== acInput) acInput.value = ac.minutes || '';
+        $('#autoclose').classList.toggle('open', Boolean(ac.minutes));
+        const busy = state.rooms.filter((r) => r.members.length).length;
+        const hm = (t) => new Date(t).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
+        $('#autoclose-text').textContent = !ac.minutes
+          ? '未启用。留空表示不自动关站。'
+          : !state.open
+            ? '已启用，站点当前已关闭。'
+            : busy
+              ? `有 ${busy} 个房间正在使用，不会关站。`
+              : ac.closeAt
+                ? `当前无人使用，将于 ${hm(ac.closeAt)} 自动关站。`
+                : `当前无人使用，约 ${ac.minutes} 分钟后自动关站。`;
 
         const create = state.create;
         $('#create').classList.toggle('open', create);
@@ -317,6 +344,15 @@
         await post('/api/admin/open', { open: !state.open });
         load();
       };
+      $('#autoclose-save').onclick = async () => {
+        const v = $('#autoclose-min').value.trim();
+        const n = v === '' ? 0 : Math.round(Number(v));
+        if (v !== '' && !(n > 0)) return alert('请填正整数分钟，或留空表示不启用。');
+        await post('/api/admin/autoclose', { minutes: n });
+        $('#autoclose-min').blur();
+        load();
+      };
+      $('#autoclose-min').addEventListener('keydown', (e) => e.key === 'Enter' && $('#autoclose-save').click());
       $('#transport-toggle').onclick = async () => {
         await post('/api/admin/transport', { transport: state.transport === 'p2p' ? 'ws' : 'p2p' });
         load();

@@ -211,6 +211,10 @@ body[data-view='loading'] .screen-dots i:nth-child(3) { animation-delay: 0.3s; }
 .site-state strong { font-size: 18px; font-weight: 600; }
 .site-state p { margin: 0; color: var(--muted); font-size: 14px; }
 .site-state .grow { flex: 1; }
+.site-state strong input {
+  width: 4.5em; font: inherit; font-size: 16px; color: inherit; text-align: center;
+  background: var(--paper); border: 1px solid var(--line); border-radius: 8px; padding: 2px 6px; margin: 0 4px;
+}
 .rooms { width: 100%; border-collapse: collapse; font-size: 14px; }
 .rooms th { text-align: left; font-weight: 500; color: var(--muted); padding: 8px 10px; border-bottom: 1px solid var(--line); }
 .rooms td { padding: 12px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }

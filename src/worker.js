@@ -343,14 +343,19 @@ async function adminApi(req, env, path) {
       settingsSpec: SETTINGS,
       turn: Boolean(env.TURN_KEY_ID && env.TURN_KEY_API_TOKEN),
       relay: relayReady(env) ? { url: env.RELAY_URL, health: await relayHealth(env) } : null,
+      autoClose: await reg.getAutoClose(),
     });
+  }
+
+  if (path === '/api/admin/autoclose' && req.method === 'POST') {
+    const n = Math.round(Number(body.minutes));
+    await reg.setAutoClose(Number.isFinite(n) && n > 0 ? Math.min(n, 1440) : 0);
+    return json(await reg.getAutoClose());
   }
 
   if (path === '/api/admin/open' && req.method === 'POST') {
     const v = await reg.setOpen(Boolean(body.open));
     siteCache = { v: await reg.getSite(), t: Date.now() };
-    // 关站时结束所有房间
-    if (!v) await Promise.all((await reg.list()).map((id) => roomStub(env, id).end('closed')));
     return json({ open: v });
   }
 
@@ -426,6 +431,9 @@ export class Room extends DurableObject {
   }
   members() {
     return this.ctx.getWebSockets('m');
+  }
+  memberCount() {
+    return this.members().length;
   }
   // 房间创建时把当时的后台设置固定下来，之后改设置只影响新房间
   cfg(meta) {
@@ -765,9 +773,64 @@ export class Registry extends DurableObject {
   async setCreate(v) {
     await this.ctx.storage.put('create', Boolean(v));
   }
+  // 开关站点。关站时结束所有房间；开站时开始"无人使用自动关站"的检查
   async setOpen(v) {
-    await this.ctx.storage.put('open', Boolean(v));
-    return Boolean(v);
+    const open = Boolean(v);
+    await this.ctx.storage.put('open', open);
+    await this.ctx.storage.delete('idleSince');
+    if (open) await this.scheduleCheck(5e3);
+    else {
+      await this.ctx.storage.deleteAlarm();
+      await Promise.all((await this.list()).map((id) => this.env.ROOM.get(this.env.ROOM.idFromName(id)).end('closed')));
+    }
+    return open;
+  }
+
+  // ---------- 无人使用自动关站 ----------
+  // 站点开放期间每隔一段时间检查一次：所有房间都没人的状态持续够久，就关站。
+  checkMs() {
+    return num(this.env.AUTOCLOSE_CHECK_SECONDS, 60) * 1e3;
+  }
+  async scheduleCheck(delay) {
+    await this.ctx.storage.setAlarm(Date.now() + (delay ?? this.checkMs()));
+  }
+  async getAutoClose() {
+    const m = await this.ctx.storage.get(['autoCloseMinutes', 'idleSince', 'open']);
+    const minutes = m.get('autoCloseMinutes') || 0;
+    const idleSince = m.get('idleSince') || null;
+    return {
+      minutes,
+      idleSince,
+      closeAt: minutes && idleSince && m.get('open') ? idleSince + minutes * 60e3 : null,
+    };
+  }
+  async setAutoClose(minutes) {
+    await this.ctx.storage.put('autoCloseMinutes', minutes);
+    await this.ctx.storage.delete('idleSince');
+    if (minutes && (await this.getOpen())) await this.scheduleCheck(2e3);
+  }
+  async alarm() {
+    const m = await this.ctx.storage.get(['autoCloseMinutes', 'idleSince', 'open']);
+    const minutes = m.get('autoCloseMinutes') || 0;
+    if (!m.get('open') || !minutes) return; // 关站或未启用：不再检查
+    const ids = await this.list();
+    const counts = await Promise.all(
+      ids.map((id) => this.env.ROOM.get(this.env.ROOM.idFromName(id)).memberCount().catch(() => 0)),
+    );
+    const now = Date.now();
+    if (counts.some((c) => c > 0)) {
+      await this.ctx.storage.delete('idleSince');
+      return this.scheduleCheck();
+    }
+    const idleSince = m.get('idleSince') || now;
+    if (!m.get('idleSince')) await this.ctx.storage.put('idleSince', idleSince);
+    const closeAt = idleSince + minutes * 60e3;
+    if (now >= closeAt) {
+      console.log('auto close: idle since', new Date(idleSince).toISOString());
+      await this.setOpen(false);
+      return;
+    }
+    await this.scheduleCheck(Math.min(this.checkMs(), closeAt - now));
   }
 
   async getSettings() {
