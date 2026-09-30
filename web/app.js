@@ -23,6 +23,11 @@ const ICE_OVERRIDE = (() => {
 })();
 const DEFAULT_ICE = [{ urls: 'stun:stun.cloudflare.com:3478' }];
 
+// 基础路径：同一套页面既可以直接挂在根路径（/），也可以经反代挂在子路径下（如 /chat/）。
+// index.html 用相对路径加载 app.js，所以 app.js 自己所在的目录就是基础路径。
+const BASE = new URL('./', import.meta.url).pathname; // 以 / 结尾，如 '/' 或 '/chat/'
+const at = (p) => `${BASE}${p}`; // at('api/status') -> '/chat/api/status'
+
 const $ = (sel) => document.querySelector(sel);
 const el = (tag, cls, text) => {
   const n = document.createElement(tag);
@@ -117,13 +122,15 @@ let transport = 'p2p'; // 当前房间的中转方式：'ws'（经 VPS 中转）
 const hasWebRTC = typeof RTCPeerConnection !== 'undefined';
 
 async function boot() {
-  const st = await api('/api/status');
+  const st = await api(at('api/status'));
   if (!st.ok) return showScreen('无法连接', '服务器暂时连不上，请稍后刷新重试。');
   isAdmin = Boolean(st.body.admin);
   canCreate = isAdmin || Boolean(st.body.create);
   if (!st.body.open && !isAdmin) return showClosed();
 
-  const raw = decodeURIComponent(location.pathname.slice(1));
+  // 不在基础路径下（比如少了结尾的 /）：跳到规范地址
+  if (!location.pathname.startsWith(BASE)) return location.replace(BASE);
+  const raw = decodeURIComponent(location.pathname.slice(BASE.length));
   if (!raw) {
     // 新房间的中转方式由后台决定；只有 P2P 模式需要浏览器支持 WebRTC
     if (st.body.transport !== 'ws' && !hasWebRTC) return showNoWebRTC();
@@ -132,9 +139,9 @@ async function boot() {
 
   const id = normalizeId(raw);
   if (!ID_RE.test(id)) return showScreen('房间不存在', '检查一下链接是否完整，或者回到首页新建一个房间。', { home: true });
-  if (id !== raw) history.replaceState(null, '', `/${id}`);
+  if (id !== raw) history.replaceState(null, '', at(id));
 
-  const r = await api(`/api/rooms/${id}`);
+  const r = await api(at(`api/rooms/${id}`));
   if (r.body.error === 'closed') return showClosed();
   if (!r.ok) return showScreen('无法连接', '服务器暂时连不上，请稍后刷新重试。');
   const s = r.body;
@@ -174,9 +181,9 @@ async function homeGo() {
   if (!ID_RE.test(id)) return (err.textContent = '房间号是 6 位字母或数字。');
   const btn = $('#home-go');
   btn.disabled = true;
-  const r = await post('/api/rooms', { id, uid: me.uid });
+  const r = await post(at('api/rooms'), { id, uid: me.uid });
   btn.disabled = false;
-  if (r.ok) return location.assign(`/${r.body.id}`);
+  if (r.ok) return location.assign(at(r.body.id));
   const e = r.body.error;
   if (e === 'closed') return showClosed();
   if (e === 'banned') return showBanned();
@@ -203,7 +210,7 @@ function enter(id) {
     const q = new URLSearchParams({ uid: me.uid, name: me.name });
     const rt = getToken(id);
     if (rt) q.set('rt', rt);
-    return `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws/${id}?${q}`;
+    return `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}${at(`ws/${id}`)}?${q}`;
   });
   conn.addEventListener('data', (e) => onControl(e.detail));
   conn.addEventListener('down', () => {
@@ -275,7 +282,7 @@ async function onControl(m) {
 // TURN 凭证由服务端签发，只给房间成员；失败时退回只用 STUN
 async function loadIce(token) {
   if (ICE_OVERRIDE) return ICE_OVERRIDE;
-  const r = await post('/api/ice', { room: roomId, token, uid: me.uid });
+  const r = await post(at('api/ice'), { room: roomId, token, uid: me.uid });
   if (r.ok && Array.isArray(r.body.iceServers) && r.body.iceServers.length) return r.body.iceServers;
   return DEFAULT_ICE;
 }
@@ -902,7 +909,7 @@ function bind() {
 
   $('#copy-link').addEventListener('click', async (e) => {
     const btn = e.currentTarget;
-    const link = `${location.origin}/${roomId}`;
+    const link = `${location.origin}${at(roomId)}`;
     try {
       await navigator.clipboard.writeText(link);
       btn.textContent = '已复制';
@@ -925,7 +932,7 @@ function bind() {
     const id = roomId;
     teardown();
     showScreen('你已离开房间', '房间还在继续。只要房间没有锁定，重新打开链接就能回来。', { home: true, rejoin: true });
-    $('#screen-rejoin').onclick = () => location.assign(`/${id}`);
+    $('#screen-rejoin').onclick = () => location.assign(at(id));
   });
 
   $('#bell').addEventListener('click', async () => {
@@ -964,5 +971,6 @@ function bind() {
   $('#home-id').addEventListener('keydown', (e) => e.key === 'Enter' && homeGo());
 }
 
+$('#screen-home').href = BASE;
 bind();
 boot();

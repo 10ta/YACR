@@ -1,12 +1,17 @@
-# 访客域名的 Caddy 配置示例（setup.sh 会按你的参数打印一份填好的）
+# YACR 的 Caddy 配置示例（setup.sh 会按你填写的参数打印一份填好的）
 # - /relay 开头的请求交给本机的中转服务
 # - 其余请求反代到 Cloudflare 上的源站域名（Worker）
-# - 后台只从源站域名访问，这里直接屏蔽
-# 端口按你的实际情况写：如果 443 被 sing-box 按 SNI 分流、Caddy 在 8443，就写 :8443
+# - 后台只从源站域名访问，这里屏蔽
+# 端口按实际情况写：443 被 sing-box 按 SNI 分流、Caddy 在 8443 时就写 :8443
+# Caddy 需要环境变量 YACR_PROXY_SECRET，值与 Worker 的 PROXY_SECRET 相同
 
+# ---------- 写法一：整个域名给聊天室 ----------
 chat.example.com:8443 {
-	@admin path /admin /admin.html /api/admin/*
-	respond @admin 404
+	# 注意要用 handle 包起来：respond 在 Caddy 里排在 handle 之后，单独写不会生效
+	@yacr_admin path /admin /admin.html /api/admin/*
+	handle @yacr_admin {
+		respond 404
+	}
 
 	handle /relay* {
 		reverse_proxy 127.0.0.1:8790
@@ -22,4 +27,33 @@ chat.example.com:8443 {
 			}
 		}
 	}
+}
+
+# ---------- 写法二：挂在已有网站的子路径下（如 /chat） ----------
+# 把下面这段放进已有站点块里、其他 handle 之前；handle_path 会去掉 /chat 前缀再往下处理
+example.com:8443 {
+	redir /chat /chat/ 308
+	handle_path /chat/* {
+		@yacr_admin path /admin /admin.html /api/admin/*
+		handle @yacr_admin {
+			respond 404
+		}
+
+		handle /relay* {
+			reverse_proxy 127.0.0.1:8790
+		}
+
+		handle {
+			reverse_proxy https://o.example.com {
+				header_up Host o.example.com
+				header_up X-Yacr-Proxy {$YACR_PROXY_SECRET}
+				header_up X-Yacr-Client-IP {remote_host}
+				transport http {
+					tls_server_name o.example.com
+				}
+			}
+		}
+	}
+
+	# ……你原有网站的配置……
 }

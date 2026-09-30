@@ -44,11 +44,12 @@ Yet another chat room：打开即用的临时聊天室。房间号给你生成�
 
 一个 Cloudflare Worker 同时托管静态页面和一个很小的后端：
 
-- `public/`：静态页面（首页和聊天是同一个页面，另有 `admin.html`）。访问静态文件免费且不触发 Worker。
+- `public/`：静态页面（首页和聊天是同一个页面，另有 `admin.html`）。访问静态文件免费且不触发 Worker。页面用相对路径加载资源，`app.js` 按自己所在目录确定基础路径，所以同一套文件既能挂在根路径，也能经反代挂在子路径下。
 - `src/worker.js`：只处理 `/api/*` 和 `/ws/*`，并检查 Origin，只接受本站页面（及 `ALLOWED_ORIGINS` 里的反代域名）发起的请求。
-  - `Room`（Durable Object，每个房间一个）：Trystero 信令中继、在线名单、房间锁定、自动结束。
+  - `Room`（Durable Object，每个房间一个）：信令中继、在线名单、房间锁定、自动结束，并签发中转服务的连接票据。
   - `Registry`（Durable Object，全局一个）：站点开关、访客新建开关、活跃房间列表、后台设置、封禁名单、建房 / ICE / 登录限流。
-- `web/`：前端源码，由 `scripts/build.mjs` 打包成 `public/app.js`。
+- `web/`：前端源码，由 `scripts/build.mjs` 打包成 `public/app.js`。`wsroom.js` 用和 Trystero 相同的接口实现 WebSocket 中转模式，两种模式共用一套聊天逻辑。
+- `relay/`：部署在 VPS 上的 WebSocket 中转服务、安装脚本 `setup.sh`、systemd 服务模板和 Caddy 配置示例。
 
 ## 部署（GitHub + Cloudflare Workers）
 
@@ -61,46 +62,82 @@ Yet another chat room：打开即用的临时聊天室。房间号给你生成�
    - `TURN_KEY_ID`、`TURN_KEY_API_TOKEN`（选填）：Cloudflare Realtime → TURN 里创建的 TURN Key 的 ID 和 API Token（Token 只在创建时显示一次）。
 3. 打开 `https://<你的域名>/admin`，用令牌登录，点"开放站点"。**站点默认是关闭的**；"允许访客新建"也**默认关闭**。
 4. 建议：
-   - 绑定自定义域名（`*.workers.dev` 在国内经常无法访问），域名只在控制台配置，不要写进仓库。
+   - 绑定自定义域名（`*.workers.dev` 在国内经常无法访问），域名只在控制台配置，不要写进仓库。国内访问建议再按下文"经 VPS 访问"配置反代和中转。
    - 用 Cloudflare Access 保护 `admin*` 和 `api/admin/*` 两个路径。
    - 确认自定义域名可用后，在 `wrangler.jsonc` 加上 `"workers_dev": false` 和 `"preview_urls": false`，关闭可以绕过 Access 的默认地址。
 
 之后每次推送到 `main` 都会自动重新部署，Secret 会一直保留。
 
-## WebSocket 中转服务（relay/）
+## 经 VPS 访问：反向代理 + WebSocket 中转
 
-一个很小的 Node.js 程序（依赖只有 `ws`），部署在 VPS 上，由 Caddy 把访客域名下的 `/relay` 转给它。它只认 Worker 签发的票据（房间号 + 成员 + 过期时间，用 `RELAY_SECRET` 签名），只在同一房间的成员之间转发，不存储任何内容；房间结束、成员被封禁时，Worker 会通知它断开对应连接。
+`*.workers.dev` 在国内基本打不开，Cloudflare 自定义域名直连也常常慢或不稳定。推荐的做法是让访客访问一个解析到你 VPS 的地址，VPS 上的 Caddy 做两件事：`/relay` 交给本机的 WebSocket 中转服务，其余请求反代给 Worker。
 
-安装（在 VPS 上、仓库目录里执行，需 root）：
+### 域名规划
+
+| | 作用 | 解析到 | 谁用 |
+|---|---|---|---|
+| 源站域名（如 `o.example.com`） | 在 Cloudflare 绑定为 Worker 的自定义域名 | Cloudflare（橙云） | 管理员进后台；VPS 反代的目标 |
+| 访客地址（如 `https://chat.example.com/` 或 `https://example.com/chat/`） | 朋友们打开的地址 | VPS（**灰云，仅 DNS**） | 所有访客；中转服务在它下面的 `/relay` |
+
+访客地址可以占用整个域名，也可以**挂在已有网站的子路径下**（如 `/chat`）。挂子路径的好处是不需要新增子域名和证书：网络上只能看到已有网站的域名（路径在 TLS 加密之内），证书透明度日志里也不会多出一个新名字。页面会根据自己所在的路径自动适配，房间链接形如 `https://example.com/chat/k7m2qx`，不需要额外配置；管理后台始终在源站域名的根路径下。
+
+注意：sing-box 等按 SNI 分流的程序只能看到域名、看不到路径，按路径分流由 Caddy 完成。
+
+### 安装中转服务（relay/）
+
+中转服务是一个很小的 Node.js 程序（依赖只有 `ws`）。它只认 Worker 签发的票据（房间号 + 成员 + 过期时间，用 `RELAY_SECRET` 签名），只在同一房间的成员之间转发，不存储任何内容；房间结束、成员被封禁时，Worker 会通知它断开对应连接。它只监听 `127.0.0.1`，由 Caddy 对外提供。
+
+在 VPS 上、仓库目录里执行（需 root）：
 
 ```bash
-sudo DOMAIN=chat.example.com ORIGIN_HOST=o.example.com bash relay/setup.sh
+sudo bash relay/setup.sh
 ```
 
-脚本会：安装 Node.js（如缺）、把服务装到 `/opt/yacr-relay`、生成 `/etc/yacr-relay.env`（含 `RELAY_SECRET`，只生成一次）、安装并启动 systemd 服务 `yacr-relay`，最后打印填好的 Caddy 配置和需要添加到 Worker 的两个 Secret：
+脚本会依次询问（回车使用默认值）：
 
-- `RELAY_URL` = `wss://chat.example.com/relay`
-- `RELAY_SECRET` = 脚本打印的值
+1. 访客域名（解析到这台 VPS 的域名）
+2. 源站域名（Cloudflare 上绑定到 Worker 的域名）
+3. 子路径，如 `/chat`；直接回车表示整个域名给聊天室
+4. 中转服务的本机端口（默认 8790，会检查是否被占用）
+5. Caddy 站点端口（443 被 sing-box 按 SNI 分流、Caddy 在 8443 时填 8443）
 
-脚本不会改动 Caddy 和 Cloudflare，这两步按提示手动完成。示例见 `relay/Caddyfile.example`，服务模板见 `relay/yacr-relay.service`。更新时 `git pull` 后重新运行脚本即可，密钥保持不变。日志：`journalctl -u yacr-relay -f`。
+确认后，脚本会：安装 Node.js（如缺）、把服务装到 `/opt/yacr-relay`、生成 `/etc/yacr-relay.env`（含 `RELAY_SECRET`，只生成一次，并记住这次的选项）、安装并启动 systemd 服务 `yacr-relay`，最后打印**按你的选项填好的** Caddy 配置和需要添加到 Worker 的 Secret。也可以用环境变量跳过提问，适合重复执行：
 
-没有配置这两个 Secret 时，即使后台选了 WebSocket 中转，新房间也会自动改用 P2P 直连。
+```bash
+sudo DOMAIN=example.com ORIGIN_HOST=o.example.com BASE_PATH=/chat PORT=8790 CADDY_PORT=8443 bash relay/setup.sh
+```
 
-## 经 VPS 反向代理（改善中国大陆访问）
+脚本不会改动 Caddy 和 Cloudflare，这两步按提示手动完成。更新时 `git pull` 后重新运行脚本即可，上次的选项会作为默认值，密钥保持不变。日志：`journalctl -u yacr-relay -f`。
 
-`*.workers.dev` 在国内基本打不开，Cloudflare 自定义域名直连也常常慢或不稳定。可以让访客访问一个解析到 VPS 的域名，由 VPS 把请求转给 Worker。只有页面和信令经过 VPS，聊天内容仍是浏览器之间直连（或走 TURN），VPS 流量很小。
+### Caddy
 
-需要两个域名：
+两种写法（整个域名 / 子路径）见 `relay/Caddyfile.example`，setup.sh 会打印填好的版本。要点：
 
-- **源站域名**（如 `o.example.com`）：在 Cloudflare 绑定为 Worker 的自定义域名，管理员从这里进后台，可以用 Cloudflare Access 保护。
-- **访客域名**（如 `chat.example.com`）：DNS 解析到 VPS，**不开 Cloudflare 代理（灰云）**，由 VPS 上的反代转发到源站域名。
+- 请求头 `Host` 和 TLS SNI 都改成源站域名；`X-Yacr-Proxy`、`X-Yacr-Client-IP` 两个头用 `header_up` 覆盖（访客自己伪造的会被替换掉）。
+- 屏蔽 `/admin`、`/admin.html`、`/api/admin/*`。**要写成 `handle @matcher { respond 404 }`**：单独写 `respond` 不会生效，因为 Caddy 里 `respond` 排在 `handle` 之后执行。
+- 子路径用 `handle_path /chat/*`（它会去掉前缀再转发），并加一条 `redir /chat /chat/ 308`。
+- Caddy 需要环境变量 `YACR_PROXY_SECRET`（`systemctl edit caddy`，加入 `Environment=YACR_PROXY_SECRET=…`），值与 Worker 的 `PROXY_SECRET` 相同。
 
-Worker 需要两个 Secret（用 Secret 而不是普通变量：值不公开，且不会被自动部署覆盖）：
+### Worker 的 Secret
 
-- `ALLOWED_ORIGINS`：访客域名的完整来源，如 `https://chat.example.com`，多个用逗号分隔。不设置的话，经反代来的请求会被 Origin 检查拒绝。
-- `PROXY_SECRET`：一串随机字符串（`openssl rand -hex 24`）。反代在 `X-Yacr-Proxy` 头里带上它，Worker 才会采信 `X-Yacr-Client-IP` 里的访客真实 IP；否则所有访客都会被当成 VPS 的 IP，按 IP 的限流和封禁会失效或误伤所有人。
+用 Secret 而不是普通变量：值不公开，也不会被自动部署覆盖。
 
-反代时要做到：请求头 `Host` 改成源站域名、TLS SNI 用源站域名、覆盖（而不是追加）上面两个头、支持 WebSocket，并且屏蔽 `/admin` 和 `/api/admin/`（后台只从源站域名访问）。如果反代前面还有一层本机转发（例如 sing-box 按 SNI 分流后转给 Caddy），反代看到的来源 IP 会是 `127.0.0.1`，此时需要让前一层把真实 IP 传过来（如 PROXY protocol），否则 Worker 会把这些访客都记为同一个"proxy"IP。
+- `RELAY_URL`：中转服务的对外地址，如 `wss://chat.example.com/relay` 或 `wss://example.com/chat/relay`。
+- `RELAY_SECRET`：setup.sh 打印的值。
+- `ALLOWED_ORIGINS`：访客地址的来源（**只写协议和域名，不带路径**），如 `https://example.com`，多个用逗号分隔。不设置的话，经反代来的请求会被 Origin 检查拒绝。
+- `PROXY_SECRET`：随机字符串（`openssl rand -hex 24`）。反代带上它，Worker 才会采信反代传来的访客真实 IP；否则所有访客都会被当成 VPS 的 IP，按 IP 的限流和封禁会失效或误伤所有人。
+
+没有配置 `RELAY_URL` 和 `RELAY_SECRET` 时，即使后台选了 WebSocket 中转，新房间也会自动改用 P2P 直连。
+
+### 真实 IP
+
+如果 Caddy 前面还有一层本机转发（例如 sing-box 按 SNI 分流后转给 Caddy），Caddy 看到的来源 IP 会是 `127.0.0.1`，Worker 会把这些访客都记为同一个 `proxy:` 开头的 IP（后台成员列表里能看到）。需要让前一层把真实 IP 传过来（如 PROXY protocol），否则按 IP 的限流会由所有访客共享。
+
+### 验证
+
+1. `curl https://<访客地址>/relay/health` 应输出 `ok`。
+2. 打开 `https://<源站域名>/admin`，"新房间：WebSocket 中转"卡片显示服务正常。
+3. 打开访客地址新建房间，后台房间列表里标记为"WebSocket 中转"，成员 IP 是真实 IP。
 
 ## TURN 中继
 
