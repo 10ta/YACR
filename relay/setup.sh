@@ -14,7 +14,12 @@
 #   PORT         中转服务在本机监听的端口（只监听 127.0.0.1）
 #   CADDY_PORT   访客域名在 Caddy 里的站点端口（443 被 sing-box 按 SNI 分流时通常是 8443）
 #
-# 重复执行是安全的：会更新代码并重启服务，已生成的 RELAY_SECRET 保持不变，上次的选项会作为默认值。
+# 重复执行是安全的：会更新代码并重启服务，已生成的两个密钥保持不变，上次的选项会作为默认值。
+#
+# 脚本会生成两个密钥（都保存在 /etc/yacr-relay.env）：
+#   RELAY_SECRET  中转服务与 Worker 之间共用，用于签发和校验连接票据
+#   PROXY_SECRET  Caddy 与 Worker 之间共用，Caddy 带上它，Worker 才采信反代传来的访客真实 IP
+#                 脚本会把它写进 Caddy 的 systemd 配置（环境变量 YACR_PROXY_SECRET），不会重启 Caddy
 set -euo pipefail
 
 INSTALL_DIR="${INSTALL_DIR:-/opt/yacr-relay}"
@@ -107,8 +112,19 @@ install -m 644 "$SRC_DIR/server.js" "$SRC_DIR/package.json" "$SRC_DIR/package-lo
 
 # ---------- 3. 配置（密钥只生成一次） ----------
 say "写入配置 $ENV_FILE"
+randhex() { openssl rand -hex "$1" 2>/dev/null || node -e "console.log(require('crypto').randomBytes($1).toString('hex'))"; }
+# RELAY_SECRET：Worker 签发中转票据、调用中转控制接口用
 SECRET="$(prev RELAY_SECRET)"
-[[ -n "$SECRET" ]] || SECRET="$(openssl rand -hex 32 2>/dev/null || node -e 'console.log(require("crypto").randomBytes(32).toString("hex"))')"
+[[ -n "$SECRET" ]] || SECRET="$(randhex 32)"
+# PROXY_SECRET：Caddy 反代时带给 Worker，证明"这是我的反代"，Worker 才采信它传来的访客真实 IP。
+# 与 RELAY_SECRET 是两个独立的密钥。优先级：环境变量 > 上次保存的 > Caddy 服务里已配置的 > 新生成
+if [[ -z "${PROXY_SECRET:-}" ]]; then
+  PROXY_SECRET="$(prev YACR_PROXY_SECRET)"
+fi
+if [[ -z "$PROXY_SECRET" ]]; then
+  PROXY_SECRET="$(systemctl show caddy -p Environment 2>/dev/null | tr ' ' '\n' | sed -n -E 's/^(Environment=)?YACR_PROXY_SECRET=//p' | head -1)"
+fi
+[[ -n "$PROXY_SECRET" ]] || PROXY_SECRET="$(randhex 24)"
 umask 077
 cat > "$ENV_FILE" <<CONF
 # YACR 中转服务配置（由 setup.sh 生成，重复运行会覆盖，RELAY_SECRET 保持不变）
@@ -122,6 +138,7 @@ YACR_DOMAIN=$DOMAIN
 YACR_ORIGIN_HOST=$ORIGIN_HOST
 YACR_BASE_PATH=$BASE_PATH
 YACR_CADDY_PORT=$CADDY_PORT
+YACR_PROXY_SECRET=$PROXY_SECRET
 CONF
 chmod 600 "$ENV_FILE"
 umask 022
@@ -141,7 +158,22 @@ curl -fsS "http://127.0.0.1:$PORT/relay/health" >/dev/null 2>&1 \
   || { journalctl -u yacr-relay -n 30 --no-pager; die "中转服务没有启动成功，见上面的日志"; }
 echo "中转服务已运行：http://127.0.0.1:$PORT/relay/health"
 
-# ---------- 5. 打印 Caddy 配置与后续步骤 ----------
+# ---------- 5. 给 Caddy 设置 YACR_PROXY_SECRET ----------
+CADDY_DROPIN=""
+if systemctl cat caddy >/dev/null 2>&1; then
+  say "给 Caddy 服务设置环境变量 YACR_PROXY_SECRET"
+  CADDY_DROPIN=/etc/systemd/system/caddy.service.d/yacr.conf
+  install -d -m 755 "$(dirname "$CADDY_DROPIN")"
+  umask 077
+  printf '# 由 YACR relay/setup.sh 生成\n[Service]\nEnvironment=YACR_PROXY_SECRET=%s\n' "$PROXY_SECRET" > "$CADDY_DROPIN"
+  umask 022
+  systemctl daemon-reload
+  echo "已写入 $CADDY_DROPIN（只加了这一个环境变量，Caddy 需要重启后才生效）"
+else
+  echo "没有找到 caddy 的 systemd 服务，请自行给 Caddy 设置环境变量 YACR_PROXY_SECRET=$PROXY_SECRET"
+fi
+
+# ---------- 6. 打印 Caddy 配置与后续步骤 ----------
 PROXY_BLOCK="$(cat <<BLOCK
 	# 后台只从源站域名访问。注意要用 handle 包起来：respond 在 Caddy 里排在 handle 之后，单独写不会生效
 	@yacr_admin path /admin /admin.html /api/admin/*
@@ -184,16 +216,16 @@ else
 fi
 cat <<NEXT
 
-   Caddy 需要环境变量 YACR_PROXY_SECRET（和 Worker 的 PROXY_SECRET 相同）：
-     systemctl edit caddy      # 加入：[Service] 换行 Environment=YACR_PROXY_SECRET=<值>
-   改完执行：caddy validate --config /etc/caddy/Caddyfile && systemctl restart caddy
+   Caddy 的环境变量 YACR_PROXY_SECRET 已由脚本写好${CADDY_DROPIN:+（$CADDY_DROPIN）}。
+   如果你之前用 systemctl edit 手动加过同名变量，可以删掉那一行，免得两处不一致。
+   改完 Caddyfile 执行：caddy validate --config /etc/caddy/Caddyfile && systemctl restart caddy
    验证：curl https://$DOMAIN$BASE_PATH/relay/health    应输出 ok
 
 2) Cloudflare → Worker → Settings → Variables and Secrets，添加 Secret：
    RELAY_URL       = wss://$DOMAIN$BASE_PATH/relay
    RELAY_SECRET    = $SECRET
    ALLOWED_ORIGINS = https://$DOMAIN
-   PROXY_SECRET    = 与 Caddy 的 YACR_PROXY_SECRET 相同
+   PROXY_SECRET    = $PROXY_SECRET
 
 3) 打开 https://$ORIGIN_HOST/admin，确认"新房间：WebSocket 中转"显示服务正常；
    访客地址：$PUBLIC_BASE/

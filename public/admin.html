@@ -50,6 +50,7 @@
           <div class="grow">
             <strong id="transport-title"></strong>
             <p id="transport-text"></p>
+            <p id="turn-state"></p>
           </div>
           <button class="btn ghost" id="transport-toggle" type="button"></button>
         </div>
@@ -85,7 +86,6 @@
             <button class="btn small" id="save-settings" type="button">保存设置</button>
             <span id="settings-msg" class="ok"></span>
           </div>
-          <p class="empty" id="turn-state"></p>
         </section>
       </div>
     </main>
@@ -270,8 +270,8 @@
           }
         }
         $('#turn-state').textContent = state.turn
-          ? 'TURN 中继：已配置。直连失败时会自动走 Cloudflare 中继。'
-          : 'TURN 中继：未配置（缺少 TURN_KEY_ID / TURN_KEY_API_TOKEN），直连失败的人之间无法通信。';
+          ? 'P2P 模式的 TURN 中继：已配置，直连失败时会走 Cloudflare 中继。'
+          : 'P2P 模式的 TURN 中继：未配置（缺少 TURN_KEY_ID / TURN_KEY_API_TOKEN），直连失败的人之间只能靠其他成员转发文字。';
       }
 
       $('#save-settings').onclick = async () => {

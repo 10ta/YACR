@@ -101,7 +101,12 @@ sudo bash relay/setup.sh
 4. 中转服务的本机端口（默认 8790，会检查是否被占用）
 5. Caddy 站点端口（443 被 sing-box 按 SNI 分流、Caddy 在 8443 时填 8443）
 
-确认后，脚本会：安装 Node.js（如缺）、把服务装到 `/opt/yacr-relay`、生成 `/etc/yacr-relay.env`（含 `RELAY_SECRET`，只生成一次，并记住这次的选项）、安装并启动 systemd 服务 `yacr-relay`，最后打印**按你的选项填好的** Caddy 配置和需要添加到 Worker 的 Secret。也可以用环境变量跳过提问，适合重复执行：
+确认后，脚本会：安装 Node.js（如缺）、把服务装到 `/opt/yacr-relay`、生成 `/etc/yacr-relay.env`（含两个密钥，只生成一次，并记住这次的选项）、安装并启动 systemd 服务 `yacr-relay`、把 `YACR_PROXY_SECRET` 写进 Caddy 的 systemd 配置（`/etc/systemd/system/caddy.service.d/yacr.conf`，只加这一个环境变量，不会重启 Caddy），最后打印**按你的选项填好的** Caddy 配置和需要添加到 Worker 的 4 个 Secret（含实际的值）。
+
+两个密钥的区别：
+
+- `RELAY_SECRET`：Worker 和中转服务之间共用，用来签发、校验连接票据。
+- `PROXY_SECRET`：Worker 和 Caddy 之间共用。Caddy 反代时在请求头里带上它，Worker 才采信 Caddy 传来的访客真实 IP。Caddy 那边读的环境变量名是 `YACR_PROXY_SECRET`，值与 Worker 的 `PROXY_SECRET` 相同。也可以用环境变量跳过提问，适合重复执行：
 
 ```bash
 sudo DOMAIN=example.com ORIGIN_HOST=o.example.com BASE_PATH=/chat PORT=8790 CADDY_PORT=8443 bash relay/setup.sh
@@ -116,7 +121,7 @@ sudo DOMAIN=example.com ORIGIN_HOST=o.example.com BASE_PATH=/chat PORT=8790 CADD
 - 请求头 `Host` 和 TLS SNI 都改成源站域名；`X-Yacr-Proxy`、`X-Yacr-Client-IP` 两个头用 `header_up` 覆盖（访客自己伪造的会被替换掉）。
 - 屏蔽 `/admin`、`/admin.html`、`/api/admin/*`。**要写成 `handle @matcher { respond 404 }`**：单独写 `respond` 不会生效，因为 Caddy 里 `respond` 排在 `handle` 之后执行。
 - 子路径用 `handle_path /chat/*`（它会去掉前缀再转发），并加一条 `redir /chat /chat/ 308`。
-- Caddy 需要环境变量 `YACR_PROXY_SECRET`（`systemctl edit caddy`，加入 `Environment=YACR_PROXY_SECRET=…`），值与 Worker 的 `PROXY_SECRET` 相同。
+- Caddy 需要环境变量 `YACR_PROXY_SECRET`，setup.sh 已经写好；改完 Caddyfile 后要**重启** Caddy（`systemctl restart caddy`）才会读到。可以用 `systemctl show caddy -p Environment` 确认。
 
 ### Worker 的 Secret
 
@@ -125,13 +130,18 @@ sudo DOMAIN=example.com ORIGIN_HOST=o.example.com BASE_PATH=/chat PORT=8790 CADD
 - `RELAY_URL`：中转服务的对外地址，如 `wss://chat.example.com/relay` 或 `wss://example.com/chat/relay`。
 - `RELAY_SECRET`：setup.sh 打印的值。
 - `ALLOWED_ORIGINS`：访客地址的来源（**只写协议和域名，不带路径**），如 `https://example.com`，多个用逗号分隔。不设置的话，经反代来的请求会被 Origin 检查拒绝。
-- `PROXY_SECRET`：随机字符串（`openssl rand -hex 24`）。反代带上它，Worker 才会采信反代传来的访客真实 IP；否则所有访客都会被当成 VPS 的 IP，按 IP 的限流和封禁会失效或误伤所有人。
+- `PROXY_SECRET`：setup.sh 打印的值（与 Caddy 的 `YACR_PROXY_SECRET` 相同）。反代带上它，Worker 才会采信反代传来的访客真实 IP；否则所有访客都会被当成 VPS 的 IP，按 IP 的限流和封禁会失效或误伤所有人。
 
 没有配置 `RELAY_URL` 和 `RELAY_SECRET` 时，即使后台选了 WebSocket 中转，新房间也会自动改用 P2P 直连。
 
 ### 真实 IP
 
 如果 Caddy 前面还有一层本机转发（例如 sing-box 按 SNI 分流后转给 Caddy），Caddy 看到的来源 IP 会是 `127.0.0.1`，Worker 会把这些访客都记为同一个 `proxy:` 开头的 IP（后台成员列表里能看到）。需要让前一层把真实 IP 传过来（如 PROXY protocol），否则按 IP 的限流会由所有访客共享。
+
+### 排查
+
+- 页面提示"与中转服务器的连接断了"：看 `journalctl -u yacr-relay -f`，中转服务会写明拒绝原因。最常见的是"来源不在 ALLOWED_ORIGINS 里"：访客打开的主机名必须是运行 setup.sh 时填的访客域名（或源站域名）。同一个 Caddy 站点服务多个主机名时，只有填写的那一个能用。
+- 管理员从源站域名进房间不受影响；`*.workers.dev` 上进 WebSocket 房间一定连不上中转，这是预期的。
 
 ### 验证
 

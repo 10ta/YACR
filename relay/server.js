@@ -106,16 +106,19 @@ server.on('upgrade', (req, socket, head) => {
   const url = new URL(req.url, 'http://x');
   const origin = req.headers.origin;
   const ticket = verifyTicket(url.searchParams.get('t'));
-  const reject = (code) => {
+  const reject = (code, why) => {
+    log('reject', code, why, `origin=${origin || '-'}`);
     socket.write(`HTTP/1.1 ${code} Forbidden\r\nConnection: close\r\n\r\n`);
     socket.destroy();
   };
-  if (url.pathname !== '/relay') return reject(404);
-  if (ORIGINS.length && origin && !ORIGINS.includes(origin)) return reject(403);
-  if (!ticket) return reject(401);
-  if (kicked.get(ticket.r)?.has(ticket.u)) return reject(403);
+  if (url.pathname !== '/relay') return reject(404, `path ${url.pathname}`);
+  if (ORIGINS.length && origin && !ORIGINS.includes(origin)) {
+    return reject(403, `来源不在 ALLOWED_ORIGINS 里（当前：${ORIGINS.join(',')}）`);
+  }
+  if (!ticket) return reject(401, '票据无效或已过期（检查 Worker 的 RELAY_SECRET 是否与本机一致）');
+  if (kicked.get(ticket.r)?.has(ticket.u)) return reject(403, '已被管理员移出');
   const room = rooms.get(ticket.r);
-  if (room && room.size >= MAX_PER_ROOM) return reject(429);
+  if (room && room.size >= MAX_PER_ROOM) return reject(429, '房间连接数已满');
   wss.handleUpgrade(req, socket, head, (ws) => onConnection(ws, ticket));
 });
 
@@ -193,4 +196,4 @@ setInterval(() => {
   }
 }, 30000).unref();
 
-server.listen(PORT, HOST, () => log(`yacr-relay listening on ${HOST}:${PORT}`));
+server.listen(PORT, HOST, () => log(`yacr-relay listening on ${HOST}:${PORT}，允许来源：${ORIGINS.join(',') || '（不限）'}`));
