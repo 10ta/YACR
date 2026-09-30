@@ -124,6 +124,9 @@ const hasWebRTC = typeof RTCPeerConnection !== 'undefined';
 
 async function boot() {
   const st = await api(at('api/status'));
+  if (st.status === 403 && st.body.error === 'forbidden_origin') {
+    return showScreen('403', '这个地址没有被允许访问聊天室。如果你是管理员，请把它加入 Worker 的 ALLOWED_ORIGINS。');
+  }
   if (!st.ok) return showScreen('无法连接', '服务器暂时连不上，请稍后刷新重试。');
   isAdmin = Boolean(st.body.admin);
   canCreate = isAdmin || Boolean(st.body.create);

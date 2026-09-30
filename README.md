@@ -85,9 +85,19 @@
 
 后台点"关闭站点"，所有房间立即结束。进不了后台时，在 Worker → Domains & Routes 移除自定义域名。**不要删除 Worker**，那会连同封禁名单和设置一起删掉。
 
+### Caddy、Worker、中转服务分别管什么？
+
+| | 管什么 |
+|---|---|
+| **Caddy** | 通路：哪些域名和路径能把请求送到聊天室。只转发，不判断权限。 |
+| **Worker 的 `ALLOWED_ORIGINS`** | 权限：只有列在这里的访客地址能使用聊天室，其他地址打开会显示 403。多个地址用逗号分隔，必须带 `https://`，如 `https://chat.example.com,https://example.com`。 |
+| **中转服务** | 只认 Worker 签发的票据，自己不需要配置允许的地址。 |
+
+所以：一个地址能打开页面，说明 Caddy 通了；显示 403，就把它加进 `ALLOWED_ORIGINS`。setup.sh 里填的访客域名只用来生成 Caddy 配置和 `RELAY_URL`，不影响权限。
+
 ### 页面提示"与中转服务器的连接断了"？
 
-在 VPS 上执行 `sudo journalctl -u yacr-relay -f`，会写明拒绝原因。最常见的两种：访客打开的地址不在 Worker 的 `ALLOWED_ORIGINS` 里（改这个变量即可，多个地址用逗号分隔）；Worker 里的 `RELAY_SECRET` 和 VPS 上的不一致。
+在 VPS 上执行 `sudo journalctl -u yacr-relay -f`，会写明拒绝原因。最常见的原因是 Worker 里的 `RELAY_SECRET` 和 VPS 上的不一致。
 
 ### 后台里访客 IP 显示为 `proxy:xxx`？
 

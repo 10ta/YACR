@@ -56,10 +56,17 @@ const allowedOrigins = (env) =>
     .map((s) => s.trim().replace(/\/+$/, ''))
     .filter(Boolean);
 const IP_RE = /^[0-9a-f.:]{3,45}$/i;
+// 请求是否来自带着正确 PROXY_SECRET 的反代
+const viaProxy = (req, env) => Boolean(env.PROXY_SECRET) && safeEqual(req.headers.get('x-yacr-proxy') || '', env.PROXY_SECRET);
+// 经反代时访客实际打开的地址（Caddy 默认会带上 X-Forwarded-Host / Proto，并覆盖访客自己伪造的值）
+const forwardedOrigin = (req) => {
+  const host = (req.headers.get('x-forwarded-host') || '').split(',')[0].trim().toLowerCase();
+  const proto = (req.headers.get('x-forwarded-proto') || 'https').split(',')[0].trim().toLowerCase();
+  return host ? `${proto}://${host}` : '';
+};
 const clientIp = (req, env) => {
   const edge = req.headers.get('cf-connecting-ip') || 'unknown';
-  const secret = env.PROXY_SECRET;
-  if (!secret || !safeEqual(req.headers.get('x-yacr-proxy') || '', secret)) return edge;
+  if (!viaProxy(req, env)) return edge;
   const real = (req.headers.get('x-yacr-client-ip') || '').trim();
   if (IP_RE.test(real) && !/^(127\.|::1$|::ffff:127\.)/.test(real)) return real;
   return `proxy:${edge}`; // 反代没拿到真实 IP（例如前面还有一层本机转发）
@@ -211,6 +218,12 @@ export default {
     const origin = req.headers.get('origin');
     if (origin && origin !== url.origin && !allowedOrigins(env).includes(origin)) {
       return json({ error: 'forbidden_origin' }, 403);
+    }
+    // 经反代访问时，按访客实际打开的地址检查：不在 ALLOWED_ORIGINS 里的地址一律 403。
+    // （同域名下的普通 GET 请求浏览器不带 Origin，只靠上面的检查拦不住）
+    if (viaProxy(req, env)) {
+      const fo = forwardedOrigin(req);
+      if (fo && !allowedOrigins(env).includes(fo)) return json({ error: 'forbidden_origin', origin: fo }, 403);
     }
 
     const admin = await isAdmin(req, env);
