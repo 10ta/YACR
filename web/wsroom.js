@@ -20,6 +20,9 @@ export function relayRoom(url, ticket, { onStatus } = {}) {
   const incoming = new Map(); // `${from}:${transferId}` -> 正在接收的文件
   const acks = new Map(); // transferId -> { acked, wake }
   let seq = 0;
+  // 断线期间要广播的消息先排队，重连后补发（手机切到选图界面时连接常被系统断开）
+  const outbox = [];
+  const OUTBOX_MAX = 200;
 
   const room = {
     onPeerJoin: null,
@@ -95,6 +98,7 @@ export function relayRoom(url, ticket, { onStatus } = {}) {
       const now = new Set(m.peers.map((p) => p.id));
       for (const id of [...peers.keys()]) if (!now.has(id)) peerLeft(id);
       for (const p of m.peers) peerJoined(p.id, p.uid);
+      while (outbox.length && ws?.readyState === WebSocket.OPEN) ws.send(outbox.shift());
       return;
     }
     if (m.t === 'join') return peerJoined(m.id, m.uid);
@@ -210,7 +214,9 @@ export function relayRoom(url, ticket, { onStatus } = {}) {
           for (const t of target || [...peers.keys()]) await sendBinary(name, data, [t], opts.metadata);
           return;
         }
-        rawSend({ t: 'm', a: name, d: data, meta: opts.metadata, to: target });
+        const msg = { t: 'm', a: name, d: data, meta: opts.metadata, to: target };
+        // 发给指定连接的消息重连后对方 id 会变，不排队；广播消息排队等重连后补发
+        if (!rawSend(msg) && !target && !closed && outbox.length < OUTBOX_MAX) outbox.push(JSON.stringify(msg));
       },
       request: (data, opts) =>
         new Promise((resolve, reject) => {

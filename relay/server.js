@@ -8,6 +8,8 @@ import { WebSocketServer } from 'ws';
 const PORT = Number(process.env.PORT || 8790);
 const HOST = process.env.HOST || '127.0.0.1';
 const SECRET = process.env.RELAY_SECRET || '';
+// 可选：只用于校验不带来源信息的旧票据。新票据里带有 Worker 核对过的页面来源，
+// 允许哪些来源统一在 Worker 的 ALLOWED_ORIGINS 里配置。
 const ORIGINS = (process.env.ALLOWED_ORIGINS || '').split(',').map((s) => s.trim().replace(/\/+$/, '')).filter(Boolean);
 const MAX_FRAME = 1024 * 1024 + 64 * 1024; // 单帧上限：1 MB 数据块 + 头
 const MAX_PER_ROOM = 40;
@@ -112,10 +114,13 @@ server.on('upgrade', (req, socket, head) => {
     socket.destroy();
   };
   if (url.pathname !== '/relay') return reject(404, `path ${url.pathname}`);
-  if (ORIGINS.length && origin && !ORIGINS.includes(origin)) {
+  if (!ticket) return reject(401, '票据无效或已过期（检查 Worker 的 RELAY_SECRET 是否与本机一致）');
+  if (ticket.o) {
+    // 票据签发给哪个页面来源，就只能从那个来源连接（防止票据被别的网站拿去用）
+    if (origin !== ticket.o) return reject(403, `来源与票据不符（票据：${ticket.o}）`);
+  } else if (ORIGINS.length && origin && !ORIGINS.includes(origin)) {
     return reject(403, `来源不在 ALLOWED_ORIGINS 里（当前：${ORIGINS.join(',')}）`);
   }
-  if (!ticket) return reject(401, '票据无效或已过期（检查 Worker 的 RELAY_SECRET 是否与本机一致）');
   if (kicked.get(ticket.r)?.has(ticket.u)) return reject(403, '已被管理员移出');
   const room = rooms.get(ticket.r);
   if (room && room.size >= MAX_PER_ROOM) return reject(429, '房间连接数已满');
@@ -196,4 +201,4 @@ setInterval(() => {
   }
 }, 30000).unref();
 
-server.listen(PORT, HOST, () => log(`yacr-relay listening on ${HOST}:${PORT}，允许来源：${ORIGINS.join(',') || '（不限）'}`));
+server.listen(PORT, HOST, () => log(`yacr-relay listening on ${HOST}:${PORT}（允许的来源由 Worker 的 ALLOWED_ORIGINS 决定）`));

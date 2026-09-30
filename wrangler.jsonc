@@ -2,6 +2,8 @@
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "yacr",
   "main": "src/worker.js",
+  // 部署时保留在 Cloudflare 控制台里添加的普通变量（如 ALLOWED_ORIGINS），否则每次部署都会被清掉
+  "keep_vars": true,
   "compatibility_date": "2026-08-01",
   "build": { "command": "npm run build" },
   "assets": {

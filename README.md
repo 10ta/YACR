@@ -1,226 +1,118 @@
 # YACR
 
-Yet another chat room：打开即用的临时聊天室。房间号给你生成好，进去后把链接发给朋友；每人随机分到一个动物名，头像是一个随机 emoji 配纯色圆底。不保存任何历史，房间结束即清空。
+**打开即用、不留记录的临时聊天室。** 发一个链接就能开聊，房间结束后所有内容随之消失。部署在 Cloudflare Workers 上，可以经你自己的 VPS 中转，国内也能稳定使用。
 
-聊天内容有两种传输方式，由管理员在后台选择，每个房间在创建时固定：
+## 简介
 
-- **WebSocket 中转**（默认）：所有消息和文件经你自己 VPS 上的中转服务转发，走 TCP 443，网页能打开就能聊天，不需要浏览器支持 WebRTC。中转服务只转发、不存储，但技术上能看到内容。
-- **P2P 直连**：浏览器之间 WebRTC 直连，服务器只负责"牵线"（信令），看不到内容；连不上时走 TURN，或由其他成员转发。
+- **发链接即聊**：房间号自动生成，每人随机分到一个动物名和 emoji 头像。支持文字、图片、音频、视频。
+- **不留记录**：服务器不保存任何消息。有人点"结束房间"、所有人离开、或 30 分钟没有新消息，房间就结束，内容全部清空。
+- **你来控制**：管理后台可以一键开关站点、决定访客能否自己建房、查看和结束房间、封禁捣乱的人。房间里的人也可以随时"禁止新人加入"。
+- **两种传输方式**（后台切换）：
+  - **WebSocket 中转**（默认）：消息经你 VPS 上的中转服务转发。只要网页能打开就能聊天，最稳定。
+  - **P2P 直连**：浏览器之间直接传输，服务器看不到内容；但部分网络之间可能连不上。
 
-## 功能
-
-**访客**
-
-- 首页：允许访客新建时，预先生成好 6 位房间号，可以换一个或改成朋友给的房间号；不允许时，首页只能填房间号加入已有房间
-- 文字消息：链接可点击，每条可复制
-- 图片、音频、视频：点"＋"选择，也可以粘贴或拖进窗口。先发缩略图"公告"，别人需要时再按需下载；5 MB 以下的图片自动下载。原发送者离开后，会向房间里其他有这个文件的人要。图片在页面内放大查看，浏览器放不了的格式提供"保存"
-- 房间里任何人都可以"禁止新人加入"，已在房间里的人刷新仍能回来
-- 成员栏显示谁已连上、谁还在连接（半透明虚线框头像）；20 秒还连不上会给出提示
-- 部分连通时自动转发：A 和 C 没能直连、但都连着 B 时，B 会把两人的文字消息和媒体公告转给对方（各自广播"我直连着谁"，只转给需要的人，最多转 3 跳）。媒体文件本身仍需从有这个文件的直连成员那里取
-- 浏览器禁用了 WebRTC 时直接提示，不会进入一个发不了消息的房间
-- 标签页标题显示未读数，可选开启系统通知；手机切回前台或网络恢复时立即重连
-- 直连失败时自动走 Cloudflare TURN 中继（需配置，仅 P2P 模式）
-
-**管理员**（`/admin`）
-
-- 站点总开关：关闭时访客只看到"网站维护中"，并结束所有房间
-- 访客新建开关（默认关闭）：关闭时只有管理员能新建房间，访客只能凭房间号加入
-- 新房间的传输方式：WebSocket 中转（默认）或 P2P 直连，并显示中转服务是否正常；房间列表里标出每个房间用的方式
-- 右上角"新建房间"：直接建房并在新标签页打开，不受上面两个开关限制
-- 查看活跃房间（成员、IP、锁定状态、最后消息时间），进入任意房间（包括已锁定、已满的），结束单个或全部房间
-- 封禁：按浏览器标识，或按 IP；封禁名单可解除
-- 房间参数：空闲时长、人数上限、单文件上限、建房频率（只对之后新建的房间生效）
-- 显示 TURN 是否已配置
-
-**房间结束条件**：结束后所有人被移出、内存中的消息和文件清空。
-
-1. 房间里任何人点"结束房间"；
-2. 所有人都离开（有 60 秒宽限，刷新页面不会误杀）；
-3. 一段时间没有新消息（默认 30 分钟，可在后台调整）；
-4. 创建后 5 分钟没人加入；
-5. 管理员在后台结束，或关闭站点。
-
-## 架构
-
-一个 Cloudflare Worker 同时托管静态页面和一个很小的后端：
-
-- `public/`：静态页面（首页和聊天是同一个页面，另有 `admin.html`）。访问静态文件免费且不触发 Worker。页面用相对路径加载资源，`app.js` 按自己所在目录确定基础路径，所以同一套文件既能挂在根路径，也能经反代挂在子路径下。
-- `src/worker.js`：只处理 `/api/*` 和 `/ws/*`，并检查 Origin，只接受本站页面（及 `ALLOWED_ORIGINS` 里的反代域名）发起的请求。
-  - `Room`（Durable Object，每个房间一个）：信令中继、在线名单、房间锁定、自动结束，并签发中转服务的连接票据。
-  - `Registry`（Durable Object，全局一个）：站点开关、访客新建开关、活跃房间列表、后台设置、封禁名单、建房 / ICE / 登录限流。
-- `web/`：前端源码，由 `scripts/build.mjs` 打包成 `public/app.js`。`wsroom.js` 用和 Trystero 相同的接口实现 WebSocket 中转模式，两种模式共用一套聊天逻辑。
-- `relay/`：部署在 VPS 上的 WebSocket 中转服务、安装脚本 `setup.sh`、systemd 服务模板和 Caddy 配置示例。
-
-## 部署（GitHub + Cloudflare Workers）
-
-1. Cloudflare 控制台 → Workers & Pages → 导入这个 GitHub 仓库。
-   - Worker 名称必须与 `wrangler.jsonc` 里的 `name` 一致。
-   - 部署命令用默认的 `npx wrangler deploy`，它会先自动执行 `npm run build`，构建命令一栏留空。
-   - 在构建设置里关闭非生产分支的构建，只让 `main` 触发部署。
-2. 在 Worker → Settings → Variables and Secrets 添加 Secret（保存后自动部署生效，不需要推代码）：
-   - `ADMIN_TOKEN`（必填）：管理后台令牌，用 `openssl rand -base64 32` 生成，存进密码管理器。
-   - `TURN_KEY_ID`、`TURN_KEY_API_TOKEN`（选填）：Cloudflare Realtime → TURN 里创建的 TURN Key 的 ID 和 API Token（Token 只在创建时显示一次）。
-3. 打开 `https://<你的域名>/admin`，用令牌登录，点"开放站点"。**站点默认是关闭的**；"允许访客新建"也**默认关闭**。
-4. 建议：
-   - 绑定自定义域名（`*.workers.dev` 在国内经常无法访问），域名只在控制台配置，不要写进仓库。国内访问建议再按下文"经 VPS 访问"配置反代和中转。
-   - 用 Cloudflare Access 保护 `admin*` 和 `api/admin/*` 两个路径。
-   - 确认自定义域名可用后，在 `wrangler.jsonc` 加上 `"workers_dev": false` 和 `"preview_urls": false`，关闭可以绕过 Access 的默认地址。
-
-之后每次推送到 `main` 都会自动重新部署，Secret 会一直保留。
-
-## 经 VPS 访问：反向代理 + WebSocket 中转
-
-`*.workers.dev` 在国内基本打不开，Cloudflare 自定义域名直连也常常慢或不稳定。推荐的做法是让访客访问一个解析到你 VPS 的地址，VPS 上的 Caddy 做两件事：`/relay` 交给本机的 WebSocket 中转服务，其余请求反代给 Worker。
-
-### 域名规划
-
-| | 作用 | 解析到 | 谁用 |
-|---|---|---|---|
-| 源站域名（如 `o.example.com`） | 在 Cloudflare 绑定为 Worker 的自定义域名 | Cloudflare（橙云） | 管理员进后台；VPS 反代的目标 |
-| 访客地址（如 `https://chat.example.com/` 或 `https://example.com/chat/`） | 朋友们打开的地址 | VPS（**灰云，仅 DNS**） | 所有访客；中转服务在它下面的 `/relay` |
-
-访客地址可以占用整个域名，也可以**挂在已有网站的子路径下**（如 `/chat`）。挂子路径的好处是不需要新增子域名和证书：网络上只能看到已有网站的域名（路径在 TLS 加密之内），证书透明度日志里也不会多出一个新名字。页面会根据自己所在的路径自动适配，房间链接形如 `https://example.com/chat/k7m2qx`，不需要额外配置；管理后台始终在源站域名的根路径下。
-
-注意：sing-box 等按 SNI 分流的程序只能看到域名、看不到路径，按路径分流由 Caddy 完成。
-
-### 安装中转服务（relay/）
-
-中转服务是一个很小的 Node.js 程序（依赖只有 `ws`）。它只认 Worker 签发的票据（房间号 + 成员 + 过期时间，用 `RELAY_SECRET` 签名），只在同一房间的成员之间转发，不存储任何内容；房间结束、成员被封禁时，Worker 会通知它断开对应连接。它只监听 `127.0.0.1`，由 Caddy 对外提供。
-
-在 VPS 上、仓库目录里执行（需 root）：
-
-```bash
-sudo bash relay/setup.sh
+```
+访客 ──▶ VPS 上的 Caddy ─┬─ /relay ──▶ 中转服务（relay/，只转发不存储）
+                         └─ 其他 ───▶ Cloudflare Worker（页面、房间管理、后台）
+管理员 ─────────────────────────────▶ Cloudflare Worker /admin
 ```
 
-脚本会依次询问（回车使用默认值）：
+## 部署
 
-1. 访客域名（解析到这台 VPS 的域名）
-2. 源站域名（Cloudflare 上绑定到 Worker 的域名）
-3. 子路径，如 `/chat`；直接回车表示整个域名给聊天室
-4. 中转服务的本机端口（默认 8790，会检查是否被占用）
-5. Caddy 站点端口（443 被 sing-box 按 SNI 分流、Caddy 在 8443 时填 8443）
+需要准备：一个 Cloudflare 账号，以及托管在 Cloudflare 上的域名；一台装了 Caddy 的 VPS（只用 P2P 模式可以不要）。
 
-确认后，脚本会：安装 Node.js（如缺）、把服务装到 `/opt/yacr-relay`、生成 `/etc/yacr-relay.env`（含两个密钥，只生成一次，并记住这次的选项）、安装并启动 systemd 服务 `yacr-relay`、把 `YACR_PROXY_SECRET` 写进 Caddy 的 systemd 配置（`/etc/systemd/system/caddy.service.d/yacr.conf`，只加这一个环境变量，不会重启 Caddy），最后打印**按你的选项填好的** Caddy 配置和需要添加到 Worker 的 4 个 Secret（含实际的值）。
+下文用 `yacr.example.com` 表示 Worker 的域名（源站），`chat.example.com` 表示发给朋友的访客地址。
 
-两个密钥的区别：
+### 第一步：部署 Worker
 
-- `RELAY_SECRET`：Worker 和中转服务之间共用，用来签发、校验连接票据。
-- `PROXY_SECRET`：Worker 和 Caddy 之间共用。Caddy 反代时在请求头里带上它，Worker 才采信 Caddy 传来的访客真实 IP。Caddy 那边读的环境变量名是 `YACR_PROXY_SECRET`，值与 Worker 的 `PROXY_SECRET` 相同。也可以用环境变量跳过提问，适合重复执行：
+1. 把本仓库 fork 或推送到你的 GitHub。
+2. Cloudflare 控制台 → Workers & Pages → 创建 → 导入这个仓库。名称填 `wrangler.jsonc` 里的 `name`，其他保持默认。
+3. Worker → Settings → Domains & Routes → Add Domain，添加 `yacr.example.com`。
+4. Worker → Settings → Variables and Secrets，添加 Secret `ADMIN_TOKEN`，值用 `openssl rand -base64 32` 生成，存进密码管理器。
+5. 打开 `https://yacr.example.com/admin`，用令牌登录，点"开放站点"。
 
-```bash
-sudo DOMAIN=example.com ORIGIN_HOST=o.example.com BASE_PATH=/chat PORT=8790 CADDY_PORT=8443 bash relay/setup.sh
-```
+到这里已经可以用了（P2P 模式）。要让国内访问稳定，继续第二步。
 
-脚本不会改动 Caddy 和 Cloudflare，这两步按提示手动完成。更新时 `git pull` 后重新运行脚本即可，上次的选项会作为默认值，密钥保持不变。日志：`journalctl -u yacr-relay -f`。
+### 第二步：在 VPS 上部署中转
 
-### Caddy
+1. 准备访客地址，二选一：
+   - 新子域名：在 Cloudflare DNS 添加 `chat.example.com`，指向 VPS 的 IP，**关闭代理（灰云）**。
+   - 已有网站的子路径（如 `https://example.com/chat/`）：不用改 DNS。
+2. 在 VPS 上运行安装脚本，按提示填写域名、子路径和端口：
 
-两种写法（整个域名 / 子路径）见 `relay/Caddyfile.example`，setup.sh 会打印填好的版本。要点：
+   ```bash
+   git clone https://github.com/<你>/YACR.git && cd YACR
+   sudo bash relay/setup.sh
+   ```
 
-- 请求头 `Host` 和 TLS SNI 都改成源站域名；`X-Yacr-Proxy`、`X-Yacr-Client-IP` 两个头用 `header_up` 覆盖（访客自己伪造的会被替换掉）。
-- 屏蔽 `/admin`、`/admin.html`、`/api/admin/*`。**要写成 `handle @matcher { respond 404 }`**：单独写 `respond` 不会生效，因为 Caddy 里 `respond` 排在 `handle` 之后执行。
-- 子路径用 `handle_path /chat/*`（它会去掉前缀再转发），并加一条 `redir /chat /chat/ 308`。
-- Caddy 需要环境变量 `YACR_PROXY_SECRET`，setup.sh 已经写好；改完 Caddyfile 后要**重启** Caddy（`systemctl restart caddy`）才会读到。可以用 `systemctl show caddy -p Environment` 确认。
+3. 把脚本最后打印的配置加进 Caddyfile，然后：
 
-### Worker 的 Secret
+   ```bash
+   sudo caddy validate --config /etc/caddy/Caddyfile && sudo systemctl restart caddy
+   curl https://chat.example.com/relay/health     # 输出 ok 即可
+   ```
 
-用 Secret 而不是普通变量：值不公开，也不会被自动部署覆盖。
+4. 回到 Worker → Variables and Secrets，按脚本打印的内容添加 4 项（3 个 Secret、1 个普通变量 `ALLOWED_ORIGINS`）。
+5. 打开后台，看到"新房间：WebSocket 中转，服务正常"就完成了。把 `https://chat.example.com/` 发给朋友即可。
 
-- `RELAY_URL`：中转服务的对外地址，如 `wss://chat.example.com/relay` 或 `wss://example.com/chat/relay`。
-- `RELAY_SECRET`：setup.sh 打印的值。
-- `ALLOWED_ORIGINS`：访客地址的来源（**只写协议和域名，不带路径**），如 `https://example.com`，多个用逗号分隔。不设置的话，经反代来的请求会被 Origin 检查拒绝。
-- `PROXY_SECRET`：setup.sh 打印的值（与 Caddy 的 `YACR_PROXY_SECRET` 相同）。反代带上它，Worker 才会采信反代传来的访客真实 IP；否则所有访客都会被当成 VPS 的 IP，按 IP 的限流和封禁会失效或误伤所有人。
+以后更新：`git pull` 后重新运行 `sudo bash relay/setup.sh`，上次的选项和密钥都会保留。
 
-没有配置 `RELAY_URL` 和 `RELAY_SECRET` 时，即使后台选了 WebSocket 中转，新房间也会自动改用 P2P 直连。
+### 第三步：收尾（推荐）
 
-### 真实 IP
+- **关闭 workers.dev 入口**：在 `wrangler.jsonc` 加上 `"workers_dev": false` 和 `"preview_urls": false`，推送。
+- **保护后台**：Cloudflare Zero Trust → Access，为 `yacr.example.com` 的 `admin*` 和 `api/admin/*` 添加只允许你邮箱的规则。
+- **平时关站**：不用的时候在后台关闭站点，要用时再打开；保持"只有你能新建房间"；人到齐后点"禁止新人加入"。
 
-如果 Caddy 前面还有一层本机转发（例如 sing-box 按 SNI 分流后转给 Caddy），Caddy 看到的来源 IP 会是 `127.0.0.1`，Worker 会把这些访客都记为同一个 `proxy:` 开头的 IP（后台成员列表里能看到）。需要让前一层把真实 IP 传过来（如 PROXY protocol），否则按 IP 的限流会由所有访客共享。
+## 常见问题
 
-### 排查
+### 密钥泄露了怎么办？
 
-- 页面提示"与中转服务器的连接断了"：看 `journalctl -u yacr-relay -f`，中转服务会写明拒绝原因。最常见的是"来源不在 ALLOWED_ORIGINS 里"：访客打开的主机名必须是运行 setup.sh 时填的访客域名（或源站域名）。同一个 Caddy 站点服务多个主机名时，只有填写的那一个能用。
-- 管理员从源站域名进房间不受影响；`*.workers.dev` 上进 WebSocket 房间一定连不上中转，这是预期的。
+| 泄露的是 | 处理 |
+|---|---|
+| `ADMIN_TOKEN` | 在 Worker 里把它改成新值，所有旧登录立即失效。 |
+| `RELAY_SECRET` / `PROXY_SECRET` | VPS 上执行 `sudo sed -i '/^RELAY_SECRET=/d;/^YACR_PROXY_SECRET=/d' /etc/yacr-relay.env`，重新运行 setup.sh，`sudo systemctl restart caddy`，再把 Worker 里这两项改成新值。 |
+| TURN 的 API Token | 在 Cloudflare Realtime → TURN 删除这个 Key，新建一个，更新 Worker 的 `TURN_KEY_ID`、`TURN_KEY_API_TOKEN`。 |
 
-### 验证
+### TURN 被滥用、流量异常怎么办？
 
-1. `curl https://<访客地址>/relay/health` 应输出 `ok`。
-2. 打开 `https://<源站域名>/admin`，"新房间：WebSocket 中转"卡片显示服务正常。
-3. 打开访客地址新建房间，后台房间列表里标记为"WebSocket 中转"，成员 IP 是真实 IP。
+在 Cloudflare Realtime → TURN 删除这个 Key，已发出的凭证随之失效。TURN 只在 P2P 模式下使用、属于可选配置，用 WebSocket 中转可以完全不配。预防方法见上面的"平时关站"。
 
-## TURN 中继
+### 忘了管理员令牌？
 
-**不配置也能用**，只是有一部分人之间会连不上：两边都用手机流量（运营商级 NAT）、公司或学校网络封锁 UDP、开着代理或 VPN 接管了流量等情况。连不上的两人互相收不到消息和文件，成员栏会显示"正在连接"并出现提示；房间人数、锁定、结束等功能不受影响。
+在 Worker 里把 `ADMIN_TOKEN` 改成一个新值，用新值登录即可。房间、封禁名单和设置都不受影响。同一 IP 连续输错 5 次会被锁 15 分钟，等一等或换个网络。
 
-**配置后**：凭证由服务端向 Cloudflare 申请，只发给持有有效令牌的房间成员，每个 IP 每 10 分钟最多申请 20 次；凭证有效期 4 小时，服务端缓存复用。已经在房间里的人需要刷新页面才会用上 TURN。
+### 需要让网站马上下线？
 
-**确认是否真的生效**：后台的"已配置"只表示两个 Secret 存在，不校验对错。可以进一个房间，在浏览器开发者工具的网络面板里查看 `/api/ice` 的返回内容，有 `turn:turn.cloudflare.com` 开头的地址才算生效；或者在 Worker 日志里搜 `TURN credentials failed`，有这条说明 Key 或 Token 不对，此时会自动退回只用 STUN。
+后台点"关闭站点"，所有房间立即结束。进不了后台时，在 Worker → Domains & Routes 移除自定义域名。**不要删除 Worker**，那会连同封禁名单和设置一起删掉。
 
-**滥用风险**：拿到凭证的人可以在有效期内用它中转任意流量，费用记在你的账户上。降低风险的做法：平时关闭站点；保持"允许访客新建"关闭（外人就只能靠猜中正在使用的房间号才能拿到令牌）；人到齐后"禁止新人加入"。发现异常用量时，在 Cloudflare 控制台删除 TURN Key 即可让凭证失效，再新建一个 Key 并更新两个 Secret。
+### 页面提示"与中转服务器的连接断了"？
 
-## 管理员登录与令牌
+在 VPS 上执行 `sudo journalctl -u yacr-relay -f`，会写明拒绝原因。最常见的两种：访客打开的地址不在 Worker 的 `ALLOWED_ORIGINS` 里（改这个变量即可，多个地址用逗号分隔）；Worker 里的 `RELAY_SECRET` 和 VPS 上的不一致。
 
-- 登录后，cookie 里**不存令牌原文**，只存"过期时间.签名"，签名由 `ADMIN_TOKEN` 通过 HMAC-SHA256 算出。有效期 30 天，服务端不需要存储会话。
-- 更换 `ADMIN_TOKEN` 后，所有浏览器里的旧登录立即失效。
-- 同一 IP 15 分钟内输错 5 次会被暂时锁定。
+### 后台里访客 IP 显示为 `proxy:xxx`？
 
-### 忘了令牌怎么办
+说明 Caddy 前面还有一层本机转发（比如 sing-box 按 SNI 分流），访客的真实 IP 在那里丢了。聊天不受影响，只是按 IP 的限流和"封 IP"会作用于所有访客。需要让前一层用 PROXY protocol 把真实 IP 传给 Caddy。
 
-找不回就直接换一个（最快，一两分钟）：
+### 服务器能看到聊天内容吗？
 
-1. 生成新令牌：`openssl rand -base64 32`，先存进密码管理器。
-2. Cloudflare 控制台 → 你的 Worker → Settings → Variables and Secrets → 编辑 `ADMIN_TOKEN`，填入新值并保存，会立即部署。
-3. 打开 `/admin`，用新令牌登录。（如果配了 Cloudflare Access，会先要求邮箱验证码。）
-4. 需要的话，点"关闭站点"。关站会同时结束所有房间。
+WebSocket 中转模式下，中转服务技术上能看到（但不存储）；P2P 模式下看不到。
 
-房间、封禁名单、各项设置都存在 Durable Object 里，换令牌不受影响。
+### P2P 模式下有人一直"正在连接"？
 
-**登录被锁怎么办**：如果之前连续输错了 5 次，这个 IP 会被锁 15 分钟，换了新令牌也一样登不上。要么等 15 分钟，要么换个网络，比如手机开热点。
+对方的网络不允许直连。改用 WebSocket 中转，或者配置 TURN：在 Cloudflare Realtime → TURN 创建 Key，把 ID 和 API Token 添加为 Worker 的 Secret `TURN_KEY_ID`、`TURN_KEY_API_TOKEN`。
 
-**更极端的情况：连后台都不想进，先让网站下线**：去 Worker → Settings → Domains & Routes，把自定义域名移除，网站马上就访问不到了（如果已关闭 workers.dev，就没有其他入口了）。这会让所有人都无法访问，事后要重新添加域名。**不要用删除 Worker 的方式来停站**：那会连同 Durable Object 里的所有数据一起删掉，包括封禁名单和设置。
+### 封禁靠得住吗？
 
-## 本地开发
+没有账号体系，只能防君子。"封禁"按浏览器标识，清除浏览器数据就能绕过；"封 IP"更难绕过，但会连带同一网络出口下的所有人。
+
+### 在哪里调参数？
+
+空闲多久自动结束、人数上限、文件大小上限、建房频率，都在后台"房间设置"里修改，只对之后新建的房间生效。部署时的默认值在 `wrangler.jsonc` 的 `vars` 里。
+
+### 怎么在本地运行？
 
 ```bash
 npm install
 cp .dev.vars.example .dev.vars   # 修改里面的 ADMIN_TOKEN
 npm run dev                      # http://localhost:8787
 ```
-
-用两个不同的浏览器（或普通窗口加无痕窗口）就能互相聊天。本地没有配置 TURN 时，可以在浏览器控制台执行 `localStorage.rc_ice = '[]'` 让直连只用本机地址，建连更快。
-
-## 参数
-
-部署默认值在 `wrangler.jsonc` 的 `vars` 里。前四项也可以在管理后台修改，后台的修改只对之后新建的房间生效。
-
-| 变量 | 默认 | 含义 |
-|---|---|---|
-| `IDLE_MINUTES` | 30 | 多久没有新消息自动结束房间 |
-| `MAX_MEMBERS` | 10 | 每个房间人数上限 |
-| `MAX_FILE_MB` | 100 | 单个图片、音频、视频的大小上限 |
-| `CREATE_LIMIT_PER_10MIN` | 10 | 每个 IP 每 10 分钟最多建几个房间（管理员不受限） |
-| `EMPTY_GRACE_SECONDS` | 60 | 所有人离开后多久结束房间 |
-| `UNJOINED_MINUTES` | 5 | 创建后多久没人加入就失效 |
-| `TOMBSTONE_HOURS` | 24 | 结束的房间号保留多久（期间打开链接显示"已结束"） |
-
-## 房间号
-
-6 位，字符集为 `0-9` 加去掉 `i l o u` 的 22 个小写字母，共 32 种字符，约 10.7 亿种组合，用 `crypto.getRandomValues` 生成，服务端建房时查重。输入不区分大小写，`o` 自动当作 `0`，`i`、`l` 当作 `1`。
-
-## 封禁的边界
-
-没有账号体系，所以封禁只能做到"防君子"：
-
-- **封禁**：按浏览器标识（存在 localStorage 的随机 ID），对方清除浏览器数据或换浏览器即可绕过。
-- **封 IP**：更难绕过，但会连带同一网络出口下的所有人（家人、同事、同一运营商的手机用户），谨慎使用。
-
-## 关于 Trystero 的处理
-
-- 使用 `@trystero-p2p/core` 0.25.4 的自定义信令策略（`web/relay.js`），版本已锁定，升级前请先测试。
-- 关闭了 trickle ICE（`trickleIce: false`）。0.25.x 在房间里有人等待超过约 57 秒后，新加入的人会连不上（上游 issue #204），关闭 trickle 后实测正常。代价是建连要等 ICE 收集，因此 `scripts/build.mjs` 打包时把 Trystero 的收集超时从 15 秒改为 3 秒；若 Trystero 源码变化导致替换失败，构建会直接报错。
-- STUN 只用 Cloudflare 的 `stun.cloudflare.com`；TURN 地址会去掉浏览器会拦截的 53 端口。
-
-## 头像 emoji
-
-`web/emoji.js` 由 unicode-emoji-json 生成：除旗帜外的全部分组，限 Emoji 12.0 及以前（老系统也能显示），不含 ZWJ 组合和键帽数字。

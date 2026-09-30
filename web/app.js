@@ -45,7 +45,8 @@ let room = null;
 let act = null;
 let locked = false;
 let ended = false;
-let synced = false;
+const leaveTimers = new Map(); // uid -> 计时器：短暂断线（如手机切到选图界面）不提示离开/加入
+const LEAVE_GRACE_MS = 20000;
 let lastActivitySent = 0;
 let maxFileBytes = 100 * 1024 * 1024;
 let presentUids = []; // 信令服务器上的在线成员（含自己），用来发现"有人在但连不上"
@@ -308,7 +309,13 @@ function startP2P(iceServers) {
 function wireRoom() {
   const hello = room.makeAction('hello');
   const chat = room.makeAction('chat');
-  const sync = room.makeAction('sync', { kind: 'request', onRequest: () => messages.slice(-SYNC_LIMIT) });
+  const sync = room.makeAction('sync', {
+    kind: 'request',
+    onRequest: (d) => {
+      const have = new Set(Array.isArray(d?.have) ? d.have : []);
+      return messages.slice(-SYNC_LIMIT).filter((m) => !have.has(m.id));
+    },
+  });
   const has = room.makeAction('has', { kind: 'request', onRequest: (d) => Boolean(d && files.has(d.id)) });
   const want = room.makeAction('want');
   const blob = room.makeAction('blob');
@@ -328,7 +335,13 @@ function wireRoom() {
     peers.set(peerId, who);
     renderMembers();
     announceLinks();
-    if (!known && who.uid !== me.uid) system(`${who.name}加入了`);
+    if (!known && who.uid !== me.uid) {
+      // 短暂断开后回来的，不提示
+      if (leaveTimers.has(who.uid)) {
+        clearTimeout(leaveTimers.get(who.uid));
+        leaveTimers.delete(who.uid);
+      } else system(`${who.name}加入了`);
+    }
   };
   chat.onMessage = (d, { peerId }) => {
     const msg = receive(d, true);
@@ -356,22 +369,28 @@ function wireRoom() {
 
   room.onPeerJoin = (peerId) => {
     hello.send({ uid: me.uid }, { target: peerId });
-    if (!synced) {
-      synced = true;
-      sync
-        .request({}, { target: peerId, timeoutMs: 15000 })
-        .then((list) => Array.isArray(list) && list.forEach((m) => receive(m, false)))
-        .catch(() => (synced = false));
-    }
+    // 每次和一个人连上，都向他要自己缺的消息（他也会向我要），断线期间双方发的消息都能补上
+    sync
+      .request({ have: messages.slice(-SYNC_LIMIT).map((m) => m.id) }, { target: peerId, timeoutMs: 15000 })
+      .then((list) => Array.isArray(list) && list.forEach((m) => receive(m, false)))
+      .catch(() => { });
   };
   room.onPeerLeave = (peerId) => {
     const who = peers.get(peerId);
     peers.delete(peerId);
     links.delete(peerId);
     announceLinks();
-    if (peers.size === 0) synced = false;
     renderMembers();
-    if (who && ![...peers.values()].some((p) => p.uid === who.uid)) system(`${who.name}离开了`);
+    if (who && ![...peers.values()].some((p) => p.uid === who.uid)) {
+      clearTimeout(leaveTimers.get(who.uid));
+      leaveTimers.set(
+        who.uid,
+        setTimeout(() => {
+          leaveTimers.delete(who.uid);
+          if (!ended && ![...peers.values()].some((p) => p.uid === who.uid)) system(`${who.name}离开了`);
+        }, LEAVE_GRACE_MS),
+      );
+    }
     // 正在从这个人那里下载的文件：换一个来源
     for (const [id, l] of loading) if (l.peerId === peerId) retryFetch(id);
   };
@@ -416,6 +435,8 @@ function teardown() {
   if (ended) return;
   ended = true;
   clearTimeout(stuckTimer);
+  for (const t of leaveTimers.values()) clearTimeout(t);
+  leaveTimers.clear();
   try {
     room?.leave();
   } catch { }

@@ -76,8 +76,12 @@ async function relaySign(secret, msg) {
   const key = await crypto.subtle.importKey('raw', new TextEncoder().encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
   return b64urlBytes(new Uint8Array(await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(msg))));
 }
-async function relayTicket(env, room, uid) {
-  const body = b64urlBytes(new TextEncoder().encode(JSON.stringify({ r: room, u: uid, e: Date.now() + RELAY_TICKET_HOURS * 3600e3 })));
+// 票据里带上页面来源（已通过 Worker 的 Origin 检查），中转服务据此校验，
+// 这样允许的来源只需要在 Worker 的 ALLOWED_ORIGINS 里维护一处。
+async function relayTicket(env, room, uid, origin) {
+  const t = { r: room, u: uid, e: Date.now() + RELAY_TICKET_HOURS * 3600e3 };
+  if (origin && /^https?:\/\/[^/\s]+$/.test(origin)) t.o = origin;
+  const body = b64urlBytes(new TextEncoder().encode(JSON.stringify(t)));
   return `${body}.${await relaySign(env.RELAY_SECRET, body)}`;
 }
 // 通知中转服务（结束房间、移出成员）；失败不影响主流程
@@ -532,7 +536,10 @@ export class Room extends DurableObject {
 
     const relay =
       cfg.transport === 'ws' && relayReady(this.env)
-        ? { url: this.env.RELAY_URL, ticket: await relayTicket(this.env, meta.id, clip(url.searchParams.get('uid'), 32)) }
+        ? {
+            url: this.env.RELAY_URL,
+            ticket: await relayTicket(this.env, meta.id, clip(url.searchParams.get('uid'), 32), req.headers.get('origin')),
+          }
         : null;
     server.send(
       JSON.stringify({

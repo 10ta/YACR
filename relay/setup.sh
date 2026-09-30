@@ -131,8 +131,7 @@ cat > "$ENV_FILE" <<CONF
 RELAY_SECRET=$SECRET
 HOST=127.0.0.1
 PORT=$PORT
-# 允许连接中转服务的页面来源：访客域名，以及管理员使用的源站域名
-ALLOWED_ORIGINS=https://$DOMAIN,https://$ORIGIN_HOST
+# 允许哪些页面来源访问，统一在 Worker 的 ALLOWED_ORIGINS 里配置（中转服务按票据里的来源校验），这里不用设置
 # 以下只供 setup.sh 下次运行时作默认值
 YACR_DOMAIN=$DOMAIN
 YACR_ORIGIN_HOST=$ORIGIN_HOST
@@ -221,11 +220,13 @@ cat <<NEXT
    改完 Caddyfile 执行：caddy validate --config /etc/caddy/Caddyfile && systemctl restart caddy
    验证：curl https://$DOMAIN$BASE_PATH/relay/health    应输出 ok
 
-2) Cloudflare → Worker → Settings → Variables and Secrets，添加 Secret：
-   RELAY_URL       = wss://$DOMAIN$BASE_PATH/relay
-   RELAY_SECRET    = $SECRET
-   ALLOWED_ORIGINS = https://$DOMAIN
-   PROXY_SECRET    = $PROXY_SECRET
+2) Cloudflare → Worker → Settings → Variables and Secrets，添加：
+   类型 Secret：
+     RELAY_URL       = wss://$DOMAIN$BASE_PATH/relay
+     RELAY_SECRET    = $SECRET
+     PROXY_SECRET    = $PROXY_SECRET
+   类型 Text（普通变量，方便以后增删；多个用逗号分隔）：
+     ALLOWED_ORIGINS = https://$DOMAIN
 
 3) 打开 https://$ORIGIN_HOST/admin，确认"新房间：WebSocket 中转"显示服务正常；
    访客地址：$PUBLIC_BASE/
