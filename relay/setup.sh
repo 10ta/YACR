@@ -93,16 +93,114 @@ if [[ -t 0 ]]; then
   [[ -z "${ok:-}" || "${ok,,}" == y* ]] || die "已取消"
 fi
 
-# ---------- 1. Node.js ----------
-say "检查 Node.js"
-node_ok() { command -v node >/dev/null && [[ "$(node -p 'process.versions.node.split(".")[0]')" -ge 18 ]]; }
-if ! node_ok || ! command -v npm >/dev/null; then
-  apt-get update -qq
-  apt-get install -y -qq nodejs npm
+# ---------- 1. Node.js + pm2（NodeSource，自包含）----------
+# 替换原来的 "1. Node.js" 整段。幂等：环境已就绪时不联网、不动系统。
+#   NODE_MAJOR=24      固定 Node.js 主版本（改它再运行即切换主版本）
+#   NODE_UPDATE=1      强制更新：node 升到该主版本最新，pm2 升到最新，并 pm2 update
+#   PM2_LOG_MAXSIZE=10M / PM2_LOG_KEEP=5   pm2 日志轮转
+say "检查 Node.js / pm2"
+NODE_MAJOR="${NODE_MAJOR:-24}"
+NODE_UPDATE="${NODE_UPDATE:-0}"
+PM2_LOG_MAXSIZE="${PM2_LOG_MAXSIZE:-10M}"
+PM2_LOG_KEEP="${PM2_LOG_KEEP:-5}"
+
+_pkgver() { dpkg-query -W -f='${db:Status-Status} ${Version}\n' "$1" 2>/dev/null | awk '$1=="installed"{print $2}' || true; }
+_pm2ver() { /usr/bin/node -p "require('/usr/lib/node_modules/pm2/package.json').version" 2>/dev/null || true; }
+
+node_ok() {  # NodeSource 的 nodejs，且主版本符合
+  [[ "$(_pkgver nodejs)" == *nodesource* && -x /usr/bin/node && -x /usr/bin/npm ]] \
+    && [[ "$(/usr/bin/node -p 'process.versions.node.split(".")[0]' 2>/dev/null)" == "$NODE_MAJOR" ]]
+}
+pm2_ok() {   # pm2 已装 + 开机自启 + 日志轮转（无 systemd 的环境不要求自启）
+  [[ -x /usr/bin/pm2 && -n "$(_pm2ver)" && -f /etc/logrotate.d/pm2-root ]] \
+    && { [[ ! -d /run/systemd/system ]] || systemctl is-enabled pm2-root.service >/dev/null 2>&1; }
+}
+
+setup_node_pm2() {
+  local f tmp cand cur before after changed=0 need=()
+  local src=/etc/apt/sources.list.d/nodesource.sources
+  local clean_path="/usr/bin:/usr/sbin:/bin:/sbin:/usr/local/bin:/usr/local/sbin"
+  export DEBIAN_FRONTEND=noninteractive
+
+  command -v curl >/dev/null || need+=(curl)
+  command -v gpg >/dev/null || need+=(gpg)
+  command -v logrotate >/dev/null || need+=(logrotate)
+  [[ -e /etc/ssl/certs/ca-certificates.crt ]] || need+=(ca-certificates)
+  if ((${#need[@]})); then
+    apt-get update -qq && apt-get install -y -qq --no-install-recommends "${need[@]}" || die "安装依赖失败：${need[*]}"
+  fi
+
+  # NodeSource 源：先停用旧脚本留下的其他 NodeSource 源（同源不同 Signed-By 会让 apt 报冲突）
+  for f in /etc/apt/sources.list.d/*; do
+    [[ -f "$f" && "$f" != "$src" ]] || continue
+    case "$f" in *.list|*.sources) ;; *) continue ;; esac
+    if grep -qs 'deb\.nodesource\.com' "$f"; then mv "$f" "$f.bak.$(date +%Y%m%d%H%M%S)"; echo "已停用旧的 NodeSource 源：$f"; fi
+  done
+  install -d -m 755 /etc/apt/keyrings
+  tmp="$(mktemp)"
+  curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key | gpg --dearmor --yes -o "$tmp" || die "NodeSource 密钥下载失败"
+  [[ -s "$tmp" ]] || die "NodeSource 密钥为空"
+  install -m 644 "$tmp" /etc/apt/keyrings/nodesource.gpg; rm -f "$tmp"
+  printf '%s\n' "Types: deb" "URIs: https://deb.nodesource.com/node_${NODE_MAJOR}.x" "Suites: nodistro" \
+    "Components: main" "Signed-By: /etc/apt/keyrings/nodesource.gpg" >"$src"
+  # 同名 nodejs 包以 NodeSource 为准，Debian 自带的不会插进来
+  printf '%s\n' "Package: nodejs" "Pin: origin deb.nodesource.com" "Pin-Priority: 600" >/etc/apt/preferences.d/nodejs
+
+  # Node.js（npm 随 nodejs 自带；Debian 的 npm 包与之冲突，先卸掉）
+  if [[ "$NODE_UPDATE" == 1 ]] || ! node_ok; then
+    if dpkg -s npm >/dev/null 2>&1; then apt-get purge -y -qq npm || die "卸载 Debian 的 npm 失败"; fi
+    apt-get update -qq || die "apt-get update 失败"
+    cand="$(apt-cache policy nodejs | awk '/Candidate:/{print $2}')"
+    [[ "$cand" == *nodesource* ]] || die "nodejs 候选版本不是 NodeSource 的（${cand:-无}），检查 $src"
+    cur="$(_pkgver nodejs)"
+    if [[ "$cur" != "$cand" ]]; then
+      apt-get install -y -qq --no-install-recommends --allow-downgrades "nodejs=${cand}" || die "安装 nodejs ${cand} 失败"
+      changed=1
+    fi
+  fi
+
+  # pm2：npm 全局装到 /usr（/usr/bin/pm2），systemd 和所有 shell 都能直接找到
+  before="$(_pm2ver)"
+  if [[ "$NODE_UPDATE" == 1 || -z "$before" || ! -x /usr/bin/pm2 ]]; then
+    PATH="$clean_path" /usr/bin/npm install -g --prefix /usr --no-fund --no-audit --loglevel=error pm2@latest || die "安装 pm2 失败"
+    after="$(_pm2ver)"
+    [[ -n "$after" && -x /usr/bin/pm2 ]] || die "pm2 安装后未找到 /usr/bin/pm2"
+    [[ "$before" == "$after" ]] || changed=1
+  fi
+
+  # 开机自启（官方 systemd 单元 pm2-root.service；PATH 固定为系统路径）
+  if [[ -d /run/systemd/system ]]; then
+    if ! { systemctl is-enabled pm2-root.service >/dev/null 2>&1 && grep -qs '/usr/lib/node_modules/pm2/bin/pm2' /etc/systemd/system/pm2-root.service; }; then
+      PATH="$clean_path" /usr/bin/pm2 startup systemd -u root --hp /root >/dev/null || die "pm2 startup 失败"
+    fi
+  fi
+
+  # pm2 日志轮转（~/.pm2/logs 不在系统默认的 logrotate 范围内）
+  printf '%s\n' "# 由 app 初始化脚本生成" "/root/.pm2/pm2.log /root/.pm2/logs/*.log {" \
+    "    rotate ${PM2_LOG_KEEP}" "    maxsize ${PM2_LOG_MAXSIZE}" "    copytruncate" "    compress" \
+    "    delaycompress" "    missingok" "    notifempty" "}" >/etc/logrotate.d/pm2-root
+  chmod 644 /etc/logrotate.d/pm2-root
+
+  # 更新后让常驻的 pm2 守护进程换上新版 node/pm2（会短暂重启受管应用）
+  if [[ "$NODE_UPDATE" == 1 && "$changed" == 1 ]] && pgrep -f 'PM2.*God Daemon' >/dev/null 2>&1; then
+    echo "node/pm2 已更新，执行 pm2 update"
+    PATH="$clean_path" /usr/bin/pm2 update
+  fi
+  return 0
+}
+
+if [[ "$NODE_UPDATE" == 1 ]] || ! node_ok || ! pm2_ok; then
+  setup_node_pm2
+  hash -r   # 让当前 shell 重新查找 node / pm2 的路径
 fi
-node_ok || die "需要 Node.js 18 或更高版本，当前：$(node -v 2>/dev/null || echo 无)"
+node_ok && pm2_ok || die "Node.js ${NODE_MAJOR}.x（NodeSource）/ pm2 未就绪，当前：node $(node -v 2>/dev/null || echo 无) / pm2 $(_pm2ver)"
+for _p in /usr/local/bin/node /usr/local/bin/npm /usr/local/bin/pm2 /root/.nvm /root/.volta /root/.fnm; do
+  [[ -e "$_p" ]] && echo "提示：发现其他 Node 安装 $_p，可能抢在 /usr/bin 之前，确认不用就清掉" >&2
+done; unset _p
 NODE_BIN="$(command -v node)"
-echo "Node.js $(node -v)（$NODE_BIN）"
+echo "Node.js $(node -v)（$NODE_BIN） · pm2 $(_pm2ver)"
+[[ "$NODE_BIN" == /usr/bin/node ]] || echo "提示：当前 shell 的 node 是 $NODE_BIN，不是 /usr/bin/node" >&2
+# 启动应用后记得 pm2 save，重启后 pm2 才会恢复应用：  pm2 start app.js --name myapp && pm2 save
 
 # ---------- 2. 代码与依赖 ----------
 say "安装到 $INSTALL_DIR"
