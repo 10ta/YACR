@@ -215,6 +215,15 @@ export default {
   async fetch(req, env) {
     const url = new URL(req.url);
     const path = url.pathname;
+
+    // 页面只有一层路径（/ 、/房间号、/admin）。多层路径（如 /xxx/）会让页面里的相对路径
+    // 资源也落到单页回退上，加载出一个没有样式和脚本的空壳，所以在这里拦下。
+    if (!path.startsWith('/api/') && !path.startsWith('/ws/')) {
+      const one = path.match(/^\/([^/]+)\/+$/);
+      // /xxx/ → 去掉结尾斜杠；用相对地址，经反代挂在子路径下时也正确
+      if (one) return new Response(null, { status: 301, headers: { location: `../${one[1]}${url.search}` } });
+      return new Response('404 Not Found', { status: 404, headers: { 'content-type': 'text/plain; charset=utf-8' } });
+    }
     const origin = req.headers.get('origin');
     if (origin && origin !== url.origin && !allowedOrigins(env).includes(origin)) {
       return json({ error: 'forbidden_origin' }, 403);
